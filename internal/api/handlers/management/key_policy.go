@@ -5,12 +5,6 @@ import (
 	"net/http"
 )
 
-func (h *Handler) rejectAPIKeyPolicyWrite(c *gin.Context) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.rejectAPIKeyPolicyWriteLocked(c)
-}
-
 func (h *Handler) rejectAPIKeyPolicyWriteLocked(c *gin.Context) bool {
 	if h.cfg != nil && len(h.cfg.APIKeyPolicies) > 0 {
 		c.JSON(http.StatusConflict, gin.H{"error": "api_key_policies_present"})

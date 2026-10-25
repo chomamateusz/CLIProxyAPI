@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -856,6 +857,12 @@ func (h *OpenAIAPIHandler) VideosContent(c *gin.Context) {
 		})
 		return
 	}
+	if access.KeyPolicyFromContext(c.Request.Context()) != nil {
+		if _, bound := videoAuthBindings.get(videoID); bound && h.videoContentDownloadAuth(c) == nil {
+			c.Status(http.StatusNotFound)
+			return
+		}
+	}
 
 	payload := []byte(`{}`)
 	payload, _ = sjson.SetBytes(payload, "request_id", videoID)
@@ -971,6 +978,9 @@ func (h *OpenAIAPIHandler) videoContentDownloadAuth(c *gin.Context) *coreauth.Au
 	}
 	auth, ok := h.AuthManager.GetByID(authID)
 	if !ok {
+		return nil
+	}
+	if policy := access.KeyPolicyFromContext(c.Request.Context()); policy != nil && !policy.AllowsCredential(auth.FileName, auth.ID, auth.Label) {
 		return nil
 	}
 	return auth

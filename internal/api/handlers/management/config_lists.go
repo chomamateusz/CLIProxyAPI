@@ -51,6 +51,11 @@ func rejectInvalidFingerprintProfile(c *gin.Context, field, profile string) bool
 func (h *Handler) putStringList(c *gin.Context, set func([]string), after func(), guards ...func() bool) {
 	data, err := c.GetRawData()
 	if err != nil {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if rejectStringListWrite(guards) {
+			return
+		}
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return
 	}
@@ -60,6 +65,11 @@ func (h *Handler) putStringList(c *gin.Context, set func([]string), after func()
 			Items []string `json:"items"`
 		}
 		if err2 := json.Unmarshal(data, &obj); err2 != nil || len(obj.Items) == 0 {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			if rejectStringListWrite(guards) {
+				return
+			}
 			c.JSON(400, gin.H{"error": "invalid body"})
 			return
 		}
@@ -87,6 +97,11 @@ func (h *Handler) patchStringList(c *gin.Context, targetOf func() *[]string, aft
 		Value *string `json:"value"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if rejectStringListWrite(guards) {
+			return
+		}
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
@@ -166,23 +181,14 @@ func (h *Handler) deleteFromStringList(c *gin.Context, targetOf func() *[]string
 // api-keys
 func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
 func (h *Handler) PutAPIKeys(c *gin.Context) {
-	if h.rejectAPIKeyPolicyWrite(c) {
-		return
-	}
 	h.putStringList(c, func(v []string) {
 		h.cfg.APIKeys = append([]string(nil), v...)
 	}, nil, func() bool { return h.rejectAPIKeyPolicyWriteLocked(c) })
 }
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	if h.rejectAPIKeyPolicyWrite(c) {
-		return
-	}
 	h.patchStringList(c, func() *[]string { return &h.cfg.APIKeys }, func() {}, func() bool { return h.rejectAPIKeyPolicyWriteLocked(c) })
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	if h.rejectAPIKeyPolicyWrite(c) {
-		return
-	}
 	h.deleteFromStringList(c, func() *[]string { return &h.cfg.APIKeys }, func() {}, func() bool { return h.rejectAPIKeyPolicyWriteLocked(c) })
 }
 

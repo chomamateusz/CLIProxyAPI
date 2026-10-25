@@ -272,7 +272,7 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
 			provider = "realtime-client-secret"
 		}
 		policy := authorization.Policy
-		if provider == sdkaccess.DefaultAccessProviderName {
+		if provider == sdkaccess.DefaultAccessProviderName && policy != nil {
 			if manager == nil {
 				c.AbortWithStatus(http.StatusUnauthorized)
 				return

@@ -225,3 +225,42 @@ func TestRealtimeClientSecretRechecksIssuerPolicy(t *testing.T) {
 	manager.SetProviders(nil)
 	check(http.StatusUnauthorized)
 }
+
+func TestRealtimeClientSecretFromPlainKeySurvivesIssuerRemoval(t *testing.T) {
+	configaccess.Register(&config.SDKConfig{APIKeys: []string{"plain-fixture"}})
+	t.Cleanup(func() { configaccess.Register(nil) })
+	manager := access.NewManager()
+	manager.SetProviders(access.RegisteredProviders())
+	liveHandler := codexlive.NewHandler(coreauth.NewManager(nil, nil, nil), nil)
+	router := gin.New()
+	router.POST("/mint", accessAuthMiddleware(manager, true), liveHandler.CreateClientSecret)
+	router.GET("/check", realtimeAuthMiddleware(manager, liveHandler), func(c *gin.Context) {
+		if access.KeyPolicyFromContext(c.Request.Context()) != nil {
+			c.Status(http.StatusInternalServerError)
+			return
+		}
+		c.Status(http.StatusOK)
+	})
+	mintRequest := httptest.NewRequest(http.MethodPost, "/mint", strings.NewReader(`{"session":{"type":"realtime","model":"gpt-realtime"}}`))
+	mintRequest.Header.Set("Authorization", "Bearer plain-fixture")
+	mintResponse := httptest.NewRecorder()
+	router.ServeHTTP(mintResponse, mintRequest)
+	if mintResponse.Code != http.StatusOK {
+		t.Fatalf("mint status = %d", mintResponse.Code)
+	}
+	var minted struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(mintResponse.Body.Bytes(), &minted); err != nil || minted.Value == "" {
+		t.Fatal("invalid mint response")
+	}
+	configaccess.Register(nil)
+	manager.SetProviders(nil)
+	checkRequest := httptest.NewRequest(http.MethodGet, "/check", nil)
+	checkRequest.Header.Set("Authorization", "Bearer "+minted.Value)
+	checkResponse := httptest.NewRecorder()
+	router.ServeHTTP(checkResponse, checkRequest)
+	if checkResponse.Code != http.StatusOK {
+		t.Fatalf("secret status = %d, want %d", checkResponse.Code, http.StatusOK)
+	}
+}

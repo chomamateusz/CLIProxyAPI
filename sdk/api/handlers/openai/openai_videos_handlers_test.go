@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	apihandlers "github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -646,6 +647,59 @@ func TestVideosContentUsesSelectedAuthProxyForDownload(t *testing.T) {
 	proxyMu.Unlock()
 	if gotProxyHits != 0 {
 		t.Fatalf("global proxy hits = %d, want 0", gotProxyHits)
+	}
+}
+
+func TestVideosContentExcludesBoundCredentialForPolicyKey(t *testing.T) {
+	resetVideoAuthBindingsForTest(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		_, _ = w.Write([]byte("video-bytes"))
+	}))
+	defer upstream.Close()
+
+	const videoID, authID = "policy-video", "bound-video-auth"
+	executor := &videoAuthCaptureExecutor{requestID: videoID, contentURL: upstream.URL + "/video.mp4"}
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{ID: authID, FileName: "bound.json", Provider: "xai", Status: coreauth.StatusActive, ProxyURL: "direct"}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatal(err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(authID, auth.Provider, []*registry.ModelInfo{{ID: defaultXAIVideosModel}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+	videoAuthBindings.setWithModel(videoID, authID, defaultXAIVideosModel, defaultVideoAuthBindingTTL)
+	handler := NewOpenAIAPIHandler(apihandlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		if c.GetHeader("Authorization") == "Bearer restricted" {
+			c.Request = c.Request.WithContext(access.WithKeyPolicy(c.Request.Context(), &access.KeyPolicy{ExcludedCredentials: []string{"bound"}}))
+		}
+		c.Next()
+	})
+	router.GET("/v1/videos/:video_id/content", func(c *gin.Context) {
+		if got := handler.videoContentDownloadAuth(c); (got == nil) != (c.GetHeader("Authorization") == "Bearer restricted") {
+			t.Error("download binding did not follow credential policy")
+		}
+		handler.VideosContent(c)
+	})
+	for _, tc := range []struct {
+		key  string
+		want int
+	}{
+		{"restricted", http.StatusNotFound},
+		{"unrestricted", http.StatusOK},
+	} {
+		request := httptest.NewRequest(http.MethodGet, "/v1/videos/"+videoID+"/content", nil)
+		request.Header.Set("Authorization", "Bearer "+tc.key)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if response.Code != tc.want {
+			t.Fatalf("%s status = %d, want %d", tc.key, response.Code, tc.want)
+		}
+		if tc.want == http.StatusOK && response.Body.String() != "video-bytes" {
+			t.Fatalf("download body = %q", response.Body.String())
+		}
 	}
 }
 

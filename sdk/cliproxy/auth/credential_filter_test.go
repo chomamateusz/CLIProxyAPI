@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 
@@ -200,4 +201,21 @@ func TestPolicyAllowsExactClientAliasThroughConductor(t *testing.T) {
 	if models := executor.ExecuteModels(); len(models) != 1 || models[0] != target {
 		t.Fatalf("executed models = %v", models)
 	}
+	t.Run("home", func(t *testing.T) {
+		const homeAlias, homeID = "team-gpt", "home-alias-policy-auth"
+		manager := newHomeSelectionTestManager(t, &fixtureHomeDispatcher{payload: []byte(`{"auth":{"id":"home-alias-policy-auth","provider":"codex"}}`)})
+		manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+		executor := &forceMappingExecutor{id: "codex"}
+		manager.RegisterExecutor(executor)
+		registry.GetGlobalRegistry().RegisterClient(homeID, "codex", []*registry.ModelInfo{{ID: target}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(homeID) })
+		ctx := access.WithKeyPolicy(context.Background(), &access.KeyPolicy{Models: []string{homeAlias}})
+		opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.RequestedModelMetadataKey: homeAlias}}
+		if _, err := manager.Execute(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: target}, opts); err != nil {
+			t.Fatalf("Execute() rejected exact client alias: %v", err)
+		}
+		if models := executor.ExecuteModels(); len(models) != 1 || models[0] != target {
+			t.Fatalf("executed models = %v", models)
+		}
+	})
 }
