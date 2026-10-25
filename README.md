@@ -151,6 +151,102 @@ CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
 
+## Fleet fork
+
+This fork (branch `fleet`, rebased on upstream `main`) adds per-client-key policies, a management endpoint for temporary credential blocks, quota-aware routing strategies and scoped key-issuer credentials. Upstream behaviour is unchanged when none of the new configuration is present.
+
+### Per-client-key policy
+
+`access.api-keys` entries may be plain strings (unchanged) or objects. Patterns use `*` and are case-insensitive. Credential patterns match the auth file name in the auth dir, with or without `.json`, or the credential ID.
+
+```yaml
+access:
+  api-keys:
+    - key: "<macbook-key>"
+      name: macbook
+    - key: "<m1-key>"
+      name: m1
+      excluded-models: ["claude-fable-*"]
+```
+
+A request for a model outside the policy answers `403`:
+
+```json
+{"error":{"message":"model claude-fable-5-1 is not allowed for this API key","type":"permission_error","code":"model_not_allowed"}}
+```
+
+`/v1/models`, the Anthropic model listing and `/v1beta/models` only list models the key may use, and credential selection only considers credentials the key may use.
+
+### Temporary credential block
+
+Block one Claude credential for the `m1` key by editing `config.yaml` (the file watcher applies it without a restart):
+
+```yaml
+access:
+  api-keys:
+    - key: "<m1-key>"
+      name: m1
+      excluded-models: ["claude-fable-*"]
+      excluded-credentials: ["claude-work.json"]
+```
+
+Or through the management API (same `X-Management-Key` / Bearer auth as the other management endpoints; responses never contain key material):
+
+```sh
+# read
+curl -H "X-Management-Key: $MGMT" http://host:8317/v8/management/client-key-policies/m1
+# block
+curl -X PATCH -H "X-Management-Key: $MGMT" -H 'Content-Type: application/json' \
+  -d '{"add":{"excluded-credentials":["claude-work.json"]}}' \
+  http://host:8317/v8/management/client-key-policies/m1
+# unblock
+curl -X PATCH -H "X-Management-Key: $MGMT" -H 'Content-Type: application/json' \
+  -d '{"remove":{"excluded-credentials":["claude-work.json"]}}' \
+  http://host:8317/v8/management/client-key-policies/m1
+```
+
+`GET /v8/management/client-key-policies` lists every entry (by `name` or zero-based `index`), `PUT` replaces the four lists.
+
+### Routing strategies
+
+```yaml
+routing:
+  strategy: nearest-reset   # or most-used
+```
+
+- `nearest-reset`: within a provider, among credentials eligible for the request, pick the one whose rate-limit window resets soonest; credentials in cooldown or at their limit are skipped; ties go to the higher utilisation; credentials without a quota sample come after sampled ones.
+- `most-used`: highest utilisation first, ties go to the soonest reset; same skipping rules.
+
+Both read the rate-limit headers the proxy already records per credential (`x-codex-primary-*` for Codex, `anthropic-ratelimit-unified-5h-*` for Claude). Providers without such headers fall back to fill-first order.
+
+### Key-issuer credentials
+
+`access.key-issuer-keys` entries (same shape as `api-keys`) may only list, create and revoke client keys; every other management endpoint answers `403`.
+
+```yaml
+access:
+  key-issuer-keys:
+    - key: "<issuer-key>"
+      name: orchestrator
+```
+
+```sh
+# create (the client key is returned once)
+curl -X POST -H "X-Management-Key: $ISSUER" -H 'Content-Type: application/json' \
+  -d '{"name":"worker-01","models":["gpt-*"],"ttl":"720h"}' \
+  http://host:8317/v8/management/issued-keys
+# list (no key material)
+curl -H "X-Management-Key: $ISSUER" http://host:8317/v8/management/issued-keys
+# revoke
+curl -X DELETE -H "X-Management-Key: $ISSUER" http://host:8317/v8/management/issued-keys/worker-01
+```
+
+Issued keys are stored in `access.api-keys` with `issued-by`, `created-at` and optional `expires-at`; expired keys stop authenticating.
+
+### Deploy
+
+`scripts/fleet/deploy.sh <host> <linux-binary> [client-key]` copies the binary into `~/cliproxyapi/<version>/`, switches the `~/cliproxyapi/cli-proxy-api` symlink, restarts the `cliproxyapi` user unit and checks `/v1/models` with and without a key. `scripts/fleet/rollback.sh <host> [version]` switches back (default `8.0.39`).
+
 ## Usage Statistics
 
 Since v6.10.0, CLIProxyAPI and [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) no longer ship built-in usage statistics. If you need usage statistics, use:
