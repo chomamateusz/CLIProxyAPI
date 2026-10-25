@@ -582,6 +582,7 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 			parentCtx = logging.WithRequestID(parentCtx, requestID)
 		}
 	}
+	parentCtx = inheritKeyPolicy(parentCtx, c)
 	newCtx, cancel := context.WithCancel(parentCtx)
 
 	endpoint := ""

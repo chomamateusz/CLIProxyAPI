@@ -84,6 +84,7 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 	}
 
 	// Decode claude-fable-5-dd-<reversed> model IDs back to the real model name for routing.
+	c.Request = c.Request.WithContext(handlers.WithClientRequestedModel(c.Request.Context(), gjson.GetBytes(rawJSON, "model").String()))
 	rawJSON = rewriteClaudeDDModelInBody(rawJSON)
 
 	// Check if the client requested a streaming response.
@@ -116,6 +117,7 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 	}
 
 	// Decode claude-fable-5-dd-<reversed> model IDs back to the real model name for routing.
+	c.Request = c.Request.WithContext(handlers.WithClientRequestedModel(c.Request.Context(), gjson.GetBytes(rawJSON, "model").String()))
 	rawJSON = rewriteClaudeDDModelInBody(rawJSON)
 
 	c.Header("Content-Type", "application/json")

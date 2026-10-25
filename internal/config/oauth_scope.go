@@ -50,5 +50,8 @@ func (cfg Config) MarshalYAML() (any, error) {
 		deleteYAMLPath(&root, path.old)
 		setYAMLPath(&root, path.current, copy)
 	}
+	if err := restoreAPIKeyPolicies(&root, &cfg); err != nil {
+		return nil, err
+	}
 	return &root, nil
 }

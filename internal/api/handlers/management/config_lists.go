@@ -48,7 +48,7 @@ func rejectInvalidFingerprintProfile(c *gin.Context, field, profile string) bool
 }
 
 // Generic helpers for list[string]
-func (h *Handler) putStringList(c *gin.Context, set func([]string), after func()) {
+func (h *Handler) putStringList(c *gin.Context, set func([]string), after func(), guards ...func() bool) {
 	data, err := c.GetRawData()
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
@@ -67,6 +67,9 @@ func (h *Handler) putStringList(c *gin.Context, set func([]string), after func()
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if rejectStringListWrite(guards) {
+		return
+	}
 	set(arr)
 	if after != nil {
 		after()
@@ -76,7 +79,7 @@ func (h *Handler) putStringList(c *gin.Context, set func([]string), after func()
 
 // patchStringList resolves the list through targetOf under h.mu, so it edits the
 // current config instead of one a reload has replaced.
-func (h *Handler) patchStringList(c *gin.Context, targetOf func() *[]string, after func()) {
+func (h *Handler) patchStringList(c *gin.Context, targetOf func() *[]string, after func(), guards ...func() bool) {
 	var body struct {
 		Old   *string `json:"old"`
 		New   *string `json:"new"`
@@ -89,6 +92,9 @@ func (h *Handler) patchStringList(c *gin.Context, targetOf func() *[]string, aft
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if rejectStringListWrite(guards) {
+		return
+	}
 	target := targetOf()
 	if body.Index != nil && body.Value != nil && *body.Index >= 0 && *body.Index < len(*target) {
 		(*target)[*body.Index] = *body.Value
@@ -121,9 +127,12 @@ func (h *Handler) patchStringList(c *gin.Context, targetOf func() *[]string, aft
 
 // deleteFromStringList resolves the list through targetOf under h.mu, so it edits
 // the current config instead of one a reload has replaced.
-func (h *Handler) deleteFromStringList(c *gin.Context, targetOf func() *[]string, after func()) {
+func (h *Handler) deleteFromStringList(c *gin.Context, targetOf func() *[]string, after func(), guards ...func() bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if rejectStringListWrite(guards) {
+		return
+	}
 	target := targetOf()
 	if idxStr := c.Query("index"); idxStr != "" {
 		var idx int
@@ -157,15 +166,24 @@ func (h *Handler) deleteFromStringList(c *gin.Context, targetOf func() *[]string
 // api-keys
 func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
 func (h *Handler) PutAPIKeys(c *gin.Context) {
+	if h.rejectAPIKeyPolicyWrite(c) {
+		return
+	}
 	h.putStringList(c, func(v []string) {
 		h.cfg.APIKeys = append([]string(nil), v...)
-	}, nil)
+	}, nil, func() bool { return h.rejectAPIKeyPolicyWriteLocked(c) })
 }
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	h.patchStringList(c, func() *[]string { return &h.cfg.APIKeys }, func() {})
+	if h.rejectAPIKeyPolicyWrite(c) {
+		return
+	}
+	h.patchStringList(c, func() *[]string { return &h.cfg.APIKeys }, func() {}, func() bool { return h.rejectAPIKeyPolicyWriteLocked(c) })
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	h.deleteFromStringList(c, func() *[]string { return &h.cfg.APIKeys }, func() {})
+	if h.rejectAPIKeyPolicyWrite(c) {
+		return
+	}
+	h.deleteFromStringList(c, func() *[]string { return &h.cfg.APIKeys }, func() {}, func() bool { return h.rejectAPIKeyPolicyWriteLocked(c) })
 }
 
 // gemini-api-key: []GeminiKey

@@ -15,6 +15,7 @@ type Provider interface {
 
 // Result conveys authentication outcome.
 type Result struct {
+	Policy    *KeyPolicy
 	Provider  string
 	Principal string
 	Metadata  map[string]string

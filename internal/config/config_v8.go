@@ -246,7 +246,12 @@ func (cfg *Config) UnmarshalYAML(node *yaml.Node) error {
 	if err != nil {
 		return err
 	}
+	policies, err := splitAPIKeyPolicies(root)
+	if err != nil {
+		return err
+	}
 	decoded := legacyConfig(*cfg)
+	decoded.APIKeyPolicies = policies
 	if err = root.Decode(&decoded); err != nil {
 		return err
 	}
@@ -903,6 +908,9 @@ func ValidateV8Config(data []byte) error {
 				deleteYAMLPath(flat, container)
 			}
 		}
+	}
+	if _, err := splitAPIKeyPolicies(flat); err != nil {
+		return err
 	}
 	encoded, err := yaml.Marshal(flat)
 	if err != nil {

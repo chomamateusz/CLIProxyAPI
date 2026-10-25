@@ -691,6 +691,13 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 		}
 	}
 
+	filteredBody, errPolicy := filterKeyPolicyModelList(c, body)
+	if errPolicy != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errPolicy.Error()})
+		return
+	}
+	body = filteredBody
+
 	if modelID, detail := c.Get(ModelDetailIDContextKey); detail {
 		c.Writer.Header().Del("Content-Length")
 		var catalog struct {

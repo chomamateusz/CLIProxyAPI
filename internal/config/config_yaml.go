@@ -58,6 +58,10 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 		return fmt.Errorf("expected generated root mapping node")
 	}
 
+	if err := restoreAPIKeyPolicies(generated.Content[0], persistCfg); err != nil {
+		return err
+	}
+
 	// Keep obsolete roots until v8 migration can preserve them as comments.
 	if !migrating {
 		removeLegacyAuthBlock(original.Content[0])

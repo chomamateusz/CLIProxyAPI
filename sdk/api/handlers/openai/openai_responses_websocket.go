@@ -20,6 +20,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -312,6 +313,7 @@ func (h *OpenAIResponsesAPIHandler) authenticateResponsesWebsocketTurn(c *gin.Co
 	if result != nil && c != nil {
 		c.Set("userApiKey", result.Principal)
 		c.Set("accessProvider", result.Provider)
+		c.Set(access.KeyPolicyGinKey, result.Policy)
 		if len(result.Metadata) > 0 {
 			c.Set("accessMetadata", result.Metadata)
 		} else {
@@ -319,6 +321,7 @@ func (h *OpenAIResponsesAPIHandler) authenticateResponsesWebsocketTurn(c *gin.Co
 		}
 		if updateRequestContext && c.Request != nil {
 			reqCtx := usage.WithAPIKey(c.Request.Context(), result.Principal)
+			reqCtx = access.WithKeyPolicy(reqCtx, result.Policy)
 			reqCtx = usage.WithAccessProvider(reqCtx, result.Provider)
 			reqCtx = usage.WithIsNativeKey(reqCtx, usage.IsNativeAccessProvider(result.Provider))
 			c.Request = c.Request.WithContext(reqCtx)

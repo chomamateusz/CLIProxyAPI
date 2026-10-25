@@ -24,13 +24,14 @@ func Register(cfg *sdkconfig.SDKConfig) {
 
 	sdkaccess.RegisterProvider(
 		sdkaccess.AccessProviderTypeConfigAPIKey,
-		newProvider(sdkaccess.DefaultAccessProviderName, keys),
+		newPolicyProvider(sdkaccess.DefaultAccessProviderName, keys, cfg.APIKeyPolicies),
 	)
 }
 
 type provider struct {
-	name string
-	keys map[string]struct{}
+	name     string
+	keys     map[string]struct{}
+	policies map[string]*sdkaccess.KeyPolicy
 }
 
 func newProvider(name string, keys []string) *provider {
@@ -93,6 +94,7 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 			return &sdkaccess.Result{
 				Provider:  p.Identifier(),
 				Principal: candidate.value,
+				Policy:    p.policies[candidate.value],
 				Metadata: map[string]string{
 					"source": candidate.source,
 				},

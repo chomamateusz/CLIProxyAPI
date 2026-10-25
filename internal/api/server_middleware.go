@@ -206,10 +206,12 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 			if result != nil {
 				c.Set("userApiKey", result.Principal)
 				c.Set("accessProvider", result.Provider)
+				c.Set(sdkaccess.KeyPolicyGinKey, result.Policy)
 				if len(result.Metadata) > 0 {
 					c.Set("accessMetadata", result.Metadata)
 				}
 				reqCtx := coreusage.WithAPIKey(c.Request.Context(), result.Principal)
+				reqCtx = sdkaccess.WithKeyPolicy(reqCtx, result.Policy)
 				reqCtx = coreusage.WithAccessProvider(reqCtx, result.Provider)
 				reqCtx = coreusage.WithIsNativeKey(reqCtx, coreusage.IsNativeAccessProvider(result.Provider))
 				c.Request = c.Request.WithContext(reqCtx)
