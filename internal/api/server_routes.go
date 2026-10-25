@@ -420,6 +420,16 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Codex auth unavailable"})
 		return
 	}
+	if policy := access.KeyPolicyFromContext(ctx); policy != nil {
+		resolved := s.handlers.AuthManager.ResolveExecutionModel(selected, selectionModel)
+		if !policy.AllowsModelRoute(strings.TrimSpace(routing.Model), resolved) {
+			if selection != nil {
+				selection.End("policy_rejected")
+			}
+			c.JSON(http.StatusForbidden, gin.H{"error": gin.H{"type": "permission_error", "code": "model_not_allowed", "message": "model is not allowed for this API key"}})
+			return
+		}
+	}
 	if selection != nil && selection.CanonicalSessionID != "" {
 		meta := logging.GetClientRequestMetadata(ctx)
 		meta.SessionID = selection.CanonicalSessionID

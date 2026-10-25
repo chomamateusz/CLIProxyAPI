@@ -11,6 +11,7 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 )
@@ -18,6 +19,27 @@ import (
 type antigravityCreditsFallbackExecutor struct {
 	executeCreditsRequested []bool
 	streamCreditsRequested  []bool
+}
+
+func TestAntigravityCreditsFallbackRejectsExcludedResolvedModel(t *testing.T) {
+	const alias, target, id = "claude-safe", "claude-opus-4-6", "ag-policy-credits"
+	executor := &antigravityCreditsFallbackExecutor{}
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	registry.GetGlobalRegistry().RegisterClient(id, "antigravity", []*registry.ModelInfo{{ID: alias}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	if _, err := manager.Register(context.Background(), &Auth{ID: id, Provider: "antigravity", Attributes: map[string]string{homeUpstreamModelAttributeKey: target}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := access.WithKeyPolicy(context.Background(), &access.KeyPolicy{ExcludedModels: []string{target}})
+	_, handled, err := manager.tryAntigravityCreditsExecute(ctx, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err != nil || handled || len(executor.executeCreditsRequested) != 0 {
+		t.Fatalf("credits execution = handled %t, error %v, calls %d", handled, err, len(executor.executeCreditsRequested))
+	}
+	_, handled, err = manager.tryAntigravityCreditsExecuteStream(ctx, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{Stream: true})
+	if err != nil || handled || len(executor.streamCreditsRequested) != 0 {
+		t.Fatalf("credits stream = handled %t, error %v, calls %d", handled, err, len(executor.streamCreditsRequested))
+	}
 }
 
 func (e *antigravityCreditsFallbackExecutor) Identifier() string { return "antigravity" }

@@ -809,7 +809,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				}
 				policy, _ := c.Get(access.KeyPolicyGinKey)
 				keyPolicy, _ := policy.(*access.KeyPolicy)
-				return keyPolicy == nil || keyPolicy.AllowsCredential(current.FileName, current.ID, current.Label)
+				return keyPolicy == nil || keyPolicy.AllowsCredential(current.FileName, current.ID, current.Label) && keyPolicy.AllowsModelRoute(modelName, h.AuthManager.ResolveExecutionModel(current, modelName))
 			})
 			cliCtx = cliproxyexecutor.WithWebsocketTurnAuthorizer(cliCtx, func(turnPayload []byte) ([]byte, error) {
 				errAuth := h.authenticateResponsesWebsocketTurn(c, upgradeRequest, turnPayload, modelName, false)

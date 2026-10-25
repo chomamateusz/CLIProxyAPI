@@ -28,18 +28,12 @@ func (p *KeyPolicy) AllowsModelRoute(requested, resolved string) bool {
 	if p == nil {
 		return true
 	}
-	requested = strings.TrimSpace(thinking.ParseSuffix(requested).ModelName)
-	resolved = strings.TrimSpace(thinking.ParseSuffix(resolved).ModelName)
-	names := []string{requested, resolved}
-	resolvedNames := []string{resolved}
-	if index := strings.LastIndexByte(requested, '/'); index >= 0 && index+1 < len(requested) {
-		names = append(names, requested[index+1:])
-	}
-	if index := strings.LastIndexByte(resolved, '/'); index >= 0 && index+1 < len(resolved) {
-		base := resolved[index+1:]
-		names = append(names, base)
-		resolvedNames = append(resolvedNames, base)
-	}
+	requested = strings.TrimSpace(requested)
+	resolved = strings.TrimSpace(resolved)
+	requestedBase := strings.TrimSpace(thinking.ParseSuffix(requested).ModelName)
+	resolvedBase := strings.TrimSpace(thinking.ParseSuffix(resolved).ModelName)
+	names := []string{requested, requestedBase, resolved, resolvedBase}
+	resolvedNames := []string{resolved, resolvedBase}
 	if policyMatches(p.ExcludedModels, names) {
 		return false
 	}
@@ -47,7 +41,7 @@ func (p *KeyPolicy) AllowsModelRoute(requested, resolved string) bool {
 		return true
 	}
 	for _, name := range p.Models {
-		if !strings.Contains(name, "*") && strings.EqualFold(name, requested) {
+		if !strings.Contains(name, "*") && (strings.EqualFold(name, requested) || strings.EqualFold(name, requestedBase)) {
 			return true
 		}
 	}

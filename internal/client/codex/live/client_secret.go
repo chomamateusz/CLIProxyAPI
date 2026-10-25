@@ -18,15 +18,16 @@ import (
 )
 
 const (
-	ClientSecretSessionContextKey   = "codexLiveClientSecretSession"
-	ClientSecretPrincipalContextKey = "codexLiveClientSecretPrincipal"
-	clientSecretPrefix              = "ek_"
-	clientSecretDefaultLifetime     = 10 * time.Minute
-	clientSecretMinimumLifetime     = 10 * time.Second
-	clientSecretMaximumLifetime     = 2 * time.Hour
-	clientSecretMaxBodySize         = 64 << 10
-	clientSecretMaxEntries          = 1024
-	clientSecretMaxEntriesPerIssuer = 64
+	ClientSecretSessionContextKey        = "codexLiveClientSecretSession"
+	ClientSecretRequestedModelContextKey = "codexLiveClientSecretRequestedModel"
+	ClientSecretPrincipalContextKey      = "codexLiveClientSecretPrincipal"
+	clientSecretPrefix                   = "ek_"
+	clientSecretDefaultLifetime          = 10 * time.Minute
+	clientSecretMinimumLifetime          = 10 * time.Second
+	clientSecretMaximumLifetime          = 2 * time.Hour
+	clientSecretMaxBodySize              = 64 << 10
+	clientSecretMaxEntries               = 1024
+	clientSecretMaxEntriesPerIssuer      = 64
 )
 
 var (
@@ -41,6 +42,7 @@ type ClientSecretAuthorization struct {
 	IssuerPrincipal string
 	IssuerProvider  string
 	Session         json.RawMessage
+	RequestedModel  string
 	Policy          *access.KeyPolicy
 }
 
@@ -77,6 +79,10 @@ func newClientSecretStore() *clientSecretStore {
 }
 
 func (s *clientSecretStore) create(session json.RawMessage, lifetime time.Duration, issuerPrincipal, issuerProvider string, policies ...*access.KeyPolicy) (string, ClientSecretAuthorization, time.Time, error) {
+	return s.createWithRequestedModel(session, modelFromJSON(session), lifetime, issuerPrincipal, issuerProvider, policies...)
+}
+
+func (s *clientSecretStore) createWithRequestedModel(session json.RawMessage, requestedModel string, lifetime time.Duration, issuerPrincipal, issuerProvider string, policies ...*access.KeyPolicy) (string, ClientSecretAuthorization, time.Time, error) {
 	if s == nil {
 		return "", ClientSecretAuthorization{}, time.Time{}, errors.New("Realtime client secret store unavailable")
 	}
@@ -93,6 +99,7 @@ func (s *clientSecretStore) create(session json.RawMessage, lifetime time.Durati
 		IssuerPrincipal: strings.TrimSpace(issuerPrincipal),
 		IssuerProvider:  strings.TrimSpace(issuerProvider),
 		Session:         append(json.RawMessage(nil), session...),
+		RequestedModel:  requestedModel,
 	}
 	if len(policies) > 0 {
 		authorization.Policy = policies[0]
@@ -279,7 +286,7 @@ func (h *Handler) createClientSecret(c *gin.Context, session json.RawMessage, ex
 	issuerProvider, _ := c.Get("accessProvider")
 	issuerPrincipalValue, _ := issuerPrincipal.(string)
 	issuerProviderValue, _ := issuerProvider.(string)
-	token, authorization, expiresAt, errCreate := h.clientSecrets.create(upstreamSession, lifetime, issuerPrincipalValue, issuerProviderValue, access.KeyPolicyFromContext(c.Request.Context()))
+	token, authorization, expiresAt, errCreate := h.clientSecrets.createWithRequestedModel(upstreamSession, modelFromJSON(clientSession), lifetime, issuerPrincipalValue, issuerProviderValue, access.KeyPolicyFromContext(c.Request.Context()))
 	if errCreate != nil {
 		if errors.Is(errCreate, errClientSecretCapacity) {
 			c.Header("Retry-After", "1")

@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -141,10 +143,61 @@ func TestHomePolicyRepopExcludesRejectedCredential(t *testing.T) {
 	}
 }
 
+type manyPolicyRetryHomeDispatcher struct {
+	fixtureHomeDispatcher
+	seen int
+}
+
+func (d *manyPolicyRetryHomeDispatcher) RPopAuthWithRetryRoundConstraints(_ context.Context, _ string, _ string, _ http.Header, _ int, _ int, excluded []string, _ string) ([]byte, error) {
+	d.seen++
+	id := "blocked-" + strconv.Itoa(len(excluded))
+	if len(excluded) == 17 {
+		id = "allowed"
+	}
+	return []byte(`{"concurrency":{"accounted":true,"credential_id":"` + id + `","model":"gpt"},"auth_index":"` + id + `","auth":{"id":"` + id + `","provider":"codex"}}`), nil
+}
+
+func TestHomePolicyRepopBeyondSixteenCredentials(t *testing.T) {
+	dispatcher := &manyPolicyRetryHomeDispatcher{}
+	manager := newHomeSelectionTestManager(t, dispatcher)
+	manager.RegisterExecutor(schedulerTestExecutor{provider: "codex"})
+	ctx := access.WithKeyPolicy(context.Background(), &access.KeyPolicy{Credentials: []string{"allowed"}})
+	selection, err := manager.pickHomeDispatchSelection(ctx, "gpt", cliproxyexecutor.Options{})
+	if err != nil || selection == nil || selection.CloneAuth().ID != "allowed" || dispatcher.seen != 18 {
+		t.Fatalf("Home selection = %v, %v; dispatches = %d", selection, err, dispatcher.seen)
+	}
+	selection.End("test_complete")
+}
+
 func TestPolicyFiltersResolvedExecutionModels(t *testing.T) {
 	ctx := access.WithKeyPolicy(context.Background(), &access.KeyPolicy{Models: []string{"gpt-*"}, ExcludedModels: []string{"gpt-5"}})
 	models := filterPolicyExecutionModels(ctx, "alias", []string{"gpt-5(high)", "gpt-6", "claude-opus"})
 	if len(models) != 1 || models[0] != "gpt-6" {
 		t.Fatalf("resolved model filtering = %v", models)
+	}
+	ctx = access.WithKeyPolicy(context.Background(), &access.KeyPolicy{Models: []string{"claude-fable-5-dd-4.5-tpg"}, ExcludedModels: []string{"claude-opus*"}})
+	models = filterPolicyExecutionModels(ctx, "claude-fable-5-dd-4.5-tpg", []string{"gpt-5.4", "claude-opus-4-6"})
+	if len(models) != 1 || models[0] != "gpt-5.4" {
+		t.Fatalf("exact alias filtering = %v", models)
+	}
+}
+
+func TestPolicyAllowsExactClientAliasThroughConductor(t *testing.T) {
+	const alias, target, id = "claude-fable-5-dd-4.5-tpg", "gpt-5.4", "alias-policy-auth"
+	executor := &forceMappingExecutor{id: "codex"}
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: target}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	if _, err := manager.Register(context.Background(), &Auth{ID: id, Provider: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := access.WithKeyPolicy(context.Background(), &access.KeyPolicy{Models: []string{alias}})
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.RequestedModelMetadataKey: alias}}
+	if _, err := manager.Execute(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: target}, opts); err != nil {
+		t.Fatalf("Execute() rejected exact client alias: %v", err)
+	}
+	if models := executor.ExecuteModels(); len(models) != 1 || models[0] != target {
+		t.Fatalf("executed models = %v", models)
 	}
 }

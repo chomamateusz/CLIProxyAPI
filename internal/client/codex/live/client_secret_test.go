@@ -81,6 +81,9 @@ func TestCreateClientSecretMapsStandardRealtimeModel(t *testing.T) {
 	if got := modelFromJSON(authorization.Session); got != defaultLiveModel {
 		t.Fatalf("upstream session model = %q, want %q", got, defaultLiveModel)
 	}
+	if authorization.RequestedModel != "gpt-realtime" {
+		t.Fatalf("requested model = %q", authorization.RequestedModel)
+	}
 }
 
 func TestRealtimePolicyRejectsModelAndCarriesPolicy(t *testing.T) {
@@ -139,10 +142,12 @@ func TestStandardRealtimeCallMapsModelAndLocation(t *testing.T) {
 	handler := NewHandler(manager, nil)
 	router := gin.New()
 	router.POST("/v1/realtime/calls", handler.Handle)
+	router.POST("/v1/realtime/client_secrets", handler.CreateClientSecret)
 
 	const boundary = "standard-realtime-boundary"
 	body := multipartBody(boundary, "v=0\r\n", `{"type":"realtime","model":"gpt-realtime"}`)
 	request := httptest.NewRequest(http.MethodPost, "/v1/realtime/calls", strings.NewReader(body))
+	request = request.WithContext(access.WithKeyPolicy(request.Context(), &access.KeyPolicy{Models: []string{"gpt-realtime"}}))
 	request.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
@@ -154,6 +159,39 @@ func TestStandardRealtimeCallMapsModelAndLocation(t *testing.T) {
 	}
 	if got := modelFromJSON(executor.body); got != defaultLiveModel {
 		t.Fatalf("upstream model = %q, want %q; body=%s", got, defaultLiveModel, executor.body)
+	}
+	policy := &access.KeyPolicy{Models: []string{"gpt-realtime"}}
+	mint := httptest.NewRequest(http.MethodPost, "/v1/realtime/client_secrets", strings.NewReader(`{"session":{"type":"realtime","model":"gpt-realtime"}}`))
+	mint = mint.WithContext(access.WithKeyPolicy(mint.Context(), policy))
+	mintRec := httptest.NewRecorder()
+	router.ServeHTTP(mintRec, mint)
+	if mintRec.Code != http.StatusOK {
+		t.Fatalf("mint status = %d", mintRec.Code)
+	}
+	var minted struct {
+		Value string `json:"value"`
+	}
+	if json.Unmarshal(mintRec.Body.Bytes(), &minted) != nil {
+		t.Fatal("invalid mint response")
+	}
+	router.POST("/v1/realtime/calls/secret", func(c *gin.Context) {
+		authorization, matched, err := handler.AuthenticateClientSecret(c.Request)
+		if err != nil || !matched {
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+		c.Set(ClientSecretSessionContextKey, authorization.Session)
+		c.Set(ClientSecretRequestedModelContextKey, authorization.RequestedModel)
+		c.Request = c.Request.WithContext(access.WithKeyPolicy(c.Request.Context(), authorization.Policy))
+		c.Next()
+	}, handler.Handle)
+	secretCall := httptest.NewRequest(http.MethodPost, "/v1/realtime/calls/secret", strings.NewReader("v=0\r\n"))
+	secretCall.Header.Set("Content-Type", "application/sdp")
+	secretCall.Header.Set("Authorization", "Bearer "+minted.Value)
+	secretRec := httptest.NewRecorder()
+	router.ServeHTTP(secretRec, secretCall)
+	if secretRec.Code != http.StatusCreated {
+		t.Fatalf("secret call status = %d, want %d; body=%s", secretRec.Code, http.StatusCreated, secretRec.Body.String())
 	}
 }
 

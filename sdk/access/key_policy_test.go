@@ -22,8 +22,12 @@ func TestKeyPolicyAllowsModel(t *testing.T) {
 		{"literal brackets", KeyPolicy{Models: []string{"[ab]"}}, "a", false},
 		{"suffix exact allow", KeyPolicy{Models: []string{"gpt-5"}}, "gpt-5(high)", true},
 		{"suffix exact deny", KeyPolicy{ExcludedModels: []string{"gpt-5"}}, "gpt-5(high)", false},
-		{"prefixed exact allow", KeyPolicy{Models: []string{"gpt-5"}}, "team/gpt-5(high)", true},
-		{"prefixed exact deny", KeyPolicy{ExcludedModels: []string{"gpt-5"}}, "team/gpt-5(high)", false},
+		{"suffixed exact allow", KeyPolicy{Models: []string{"gpt-5(high)"}}, "gpt-5(high)", true},
+		{"suffixed exact deny", KeyPolicy{ExcludedModels: []string{"gpt-5(high)"}}, "gpt-5(high)", false},
+		{"suffixed wildcard deny", KeyPolicy{ExcludedModels: []string{"*(high)"}}, "gpt-5(high)", false},
+		{"suffixed wildcard permits plain", KeyPolicy{ExcludedModels: []string{"*(high)"}}, "gpt-5", true},
+		{"unrelated namespace does not widen allow", KeyPolicy{Models: []string{"gpt-5"}}, "custom/gpt-5", false},
+		{"unrelated namespace does not match exclusion", KeyPolicy{ExcludedModels: []string{"gpt-5"}}, "custom/gpt-5", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.policy.AllowsModel(tc.model); got != tc.want {
@@ -42,6 +46,8 @@ func TestKeyPolicyAllowsModelRoute(t *testing.T) {
 		{"wildcard alias cannot widen", "claude-fable-5-dd-5.5-tpg", "gpt-5.5", KeyPolicy{Models: []string{"claude-*"}}, false},
 		{"exact alias can select resolved", "claude-fable-5-dd-5.5-tpg", "gpt-5.5", KeyPolicy{Models: []string{"claude-fable-5-dd-5.5-tpg"}}, true},
 		{"resolved exclusion wins", "claude-fable-5-dd-supo-edualc", "claude-opus", KeyPolicy{ExcludedModels: []string{"claude-opus*"}}, false},
+		{"credential prefix stripped by resolution", "team/gpt-5(high)", "gpt-5(high)", KeyPolicy{Models: []string{"gpt-5"}}, true},
+		{"namespace remains distinct", "custom/gpt-5", "custom/gpt-5", KeyPolicy{Models: []string{"gpt-5"}}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.policy.AllowsModelRoute(tc.requested, tc.resolved); got != tc.want {

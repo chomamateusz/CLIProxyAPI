@@ -200,6 +200,12 @@ func (h *Handler) Handle(c *gin.Context) {
 	if errPayload == nil {
 		upstreamBody, upstreamContentType, model, errPayload = applyClientSecretCallSession(upstreamBody, upstreamContentType, model, clientSecretSession(c))
 	}
+	requestedModel := model
+	if value, exists := c.Get(ClientSecretRequestedModelContextKey); exists {
+		if fromSecret, ok := value.(string); ok && fromSecret != "" {
+			requestedModel = fromSecret
+		}
+	}
 	if errPayload == nil {
 		upstreamBody, model, errPayload = rewriteCallRequestModel(upstreamBody, upstreamContentType, model)
 	}
@@ -216,7 +222,7 @@ func (h *Handler) Handle(c *gin.Context) {
 	mediaRetained := false
 
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
-	ctx = context.WithValue(ctx, liveRequestedModelKey{}, model)
+	ctx = context.WithValue(ctx, liveRequestedModelKey{}, requestedModel)
 	selectionOpts := coreexecutor.Options{
 		Headers:         liveSelectionHeaders(c),
 		OriginalRequest: body,

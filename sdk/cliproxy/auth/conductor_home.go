@@ -1247,9 +1247,6 @@ func (m *Manager) retryHomeAfterPolicyReject(ctx context.Context, model string, 
 		return nil, &Error{Code: "auth_not_found", Message: "no eligible auth available", HTTPStatus: http.StatusServiceUnavailable}
 	}
 	excluded := homeExcludedAuthIDsFromMetadata(opts.Metadata)
-	if len(excluded) >= 16 {
-		return nil, &Error{Code: "auth_not_found", Message: "no eligible auth available", HTTPStatus: http.StatusServiceUnavailable}
-	}
 	for _, id := range excluded {
 		if id == rejected.ID {
 			return nil, &Error{Code: "auth_not_found", Message: "no eligible auth available", HTTPStatus: http.StatusServiceUnavailable}
@@ -1453,6 +1450,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		c.auth = preparedAuth
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth)
 		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(c.auth, routeModel)
+		models = filterPolicyExecutionModels(creditsCtx, requestedModelAliasFromOptions(creditsOpts, routeModel), models)
 		if len(models) == 0 {
 			continue
 		}
@@ -1516,6 +1514,7 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		c.auth = preparedAuth
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth)
 		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(c.auth, routeModel)
+		models = filterPolicyExecutionModels(creditsCtx, requestedModelAliasFromOptions(creditsOpts, routeModel), models)
 		if len(models) == 0 {
 			continue
 		}

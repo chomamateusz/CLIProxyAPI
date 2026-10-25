@@ -232,6 +232,41 @@ func TestQuotaSelectorsPick(t *testing.T) {
 	}
 }
 
+func TestQuotaSelectorsManagerDispatch(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	for _, tc := range []struct {
+		name     string
+		selector Selector
+	}{
+		{"nearest-reset", &NearestResetSelector{}},
+		{"most-used", &MostUsedSelector{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewManager(nil, tc.selector, nil)
+			manager.RegisterExecutor(schedulerTestExecutor{provider: "codex"})
+			for _, sample := range []struct {
+				id, used string
+				reset    time.Duration
+			}{{"a", "20", 3 * time.Hour}, {"b", "80", time.Hour}} {
+				a := &Auth{ID: sample.id, Provider: "codex", Quota: QuotaState{ObservedAt: now, Signals: map[string]string{
+					"X-Codex-Primary-Used-Percent": sample.used,
+					"X-Codex-Primary-Reset-At":     strconv.FormatInt(now.Add(sample.reset).Unix(), 10),
+				}}}
+				if _, err := manager.Register(context.Background(), a); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if manager.useSchedulerFastPath() {
+				t.Fatal("quota selector entered scheduler round-robin path")
+			}
+			selected, _, err := manager.pickNext(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+			if err != nil || selected == nil || selected.ID != "b" {
+				t.Fatalf("pickNext() = %v, %v; want b", selected, err)
+			}
+		})
+	}
+}
+
 func TestQuotaSessionAffinityRebindsAtLimitCredential(t *testing.T) {
 	selector := NewSessionAffinitySelector(&NearestResetSelector{})
 	defer selector.Stop()

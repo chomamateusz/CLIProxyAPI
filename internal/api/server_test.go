@@ -1390,6 +1390,31 @@ func TestCodexAlphaSearchOptInAPIKeyResolvesModelAlias(t *testing.T) {
 	}
 }
 
+func TestCodexAlphaSearchCredentialAliasRespectsExcludedModel(t *testing.T) {
+	server := newTestServer(t)
+	executor := &codexSearchCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	server.handlers.AuthManager.SetConfig(&proxyconfig.Config{CodexKey: []proxyconfig.CodexKey{{
+		APIKey: "codex-alpha-key", Prefix: "vendor", BaseURL: "https://codex.example.com/v1", AlphaSearch: true,
+		Models: []proxyconfig.CodexModel{{Name: "gpt-5.6-sol", Alias: "sol-alias"}},
+	}}})
+	credential := &auth.Auth{ID: "codex-alpha-excluded-alias", Provider: "codex", Prefix: "vendor", Status: auth.StatusActive, Attributes: map[string]string{
+		auth.AttributeAPIKey: "codex-alpha-key", auth.AttributeCodexAlphaSearch: "true", "base_url": "https://codex.example.com/v1",
+	}}
+	if _, err := server.handlers.AuthManager.Register(context.Background(), credential); err != nil {
+		t.Fatal(err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(credential.ID, credential.Provider, []*registry.ModelInfo{{ID: "vendor/sol-alias"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(credential.ID) })
+	server.accessManager.SetProviders([]sdkaccess.Provider{keyPolicyAccessProvider{policy: &sdkaccess.KeyPolicy{ExcludedModels: []string{"gpt-5.6-sol"}}}})
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"model":"vendor/sol-alias","commands":{"search_query":[{"q":"golang"}]}}`))
+	rec := httptest.NewRecorder()
+	server.engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || executor.request != nil {
+		t.Fatalf("status = %d, forwarded = %t", rec.Code, executor.request != nil)
+	}
+}
+
 func TestRewriteCodexAlphaSearchModel(t *testing.T) {
 	original := []byte(`{"id":"search-1","model":"vendor/gpt-5.6-sol","commands":{"search_query":[{"q":"golang"}]}}`)
 	rewritten := rewriteCodexAlphaSearchModel(original, "gpt-5.6-sol")

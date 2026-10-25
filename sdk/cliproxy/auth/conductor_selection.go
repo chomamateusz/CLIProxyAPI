@@ -1747,7 +1747,8 @@ func (m *Manager) useSchedulerFastPath() bool {
 	if m == nil || m.scheduler == nil {
 		return false
 	}
-	return isBuiltInSelector(m.Selector())
+	selector := m.Selector()
+	return isBuiltInSelector(selector) && selectorStrategy(selector) != schedulerStrategyCustom
 }
 
 func shouldRetrySchedulerPick(err error) bool {

@@ -1,8 +1,10 @@
 package management
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -157,30 +159,27 @@ func TestRevokeFinalIssuedKeyKeepsAuthenticationRequired(t *testing.T) {
 	if json.Unmarshal(created.Body.Bytes(), &issued) != nil || issued.Key == "" {
 		t.Fatal("missing issued key")
 	}
-	manager := access.NewManager()
-	defer configaccess.Register(nil)
-	for _, action := range []func(){func() { request("DELETE", "/issued-keys/only", "", 200) }, func() {}} {
-		select {
-		case next := <-snapshots:
-			if _, err := accessconfig.ApplyAccessProviders(manager, nil, next); err != nil {
-				t.Fatal(err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("reload callback missing")
-		}
-		action()
+	select {
+	case <-snapshots:
+	case <-time.After(5 * time.Second):
+		t.Fatal("create reload callback missing")
 	}
-	if len(manager.Providers()) == 0 {
-		t.Fatal("final revocation removed authentication provider")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	req := httptest.NewRequest("GET", "/v1/models", nil)
-	req.Header.Set("Authorization", "Bearer "+issued.Key)
-	if _, err := manager.Authenticate(context.Background(), req); err == nil {
-		t.Fatal("revoked credential authenticated")
+	denied := request("DELETE", "/issued-keys/only", "", http.StatusConflict)
+	if denied.Body.String() != `{"error":"last_client_key","message":"revoking the last client key would disable authentication"}` {
+		t.Fatalf("unexpected refusal: %s", denied.Body.String())
 	}
-	saved, err := os.ReadFile(path)
-	if err != nil || strings.Contains(string(saved), issued.Key) {
-		t.Fatal("revoked key remained in configuration")
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("refused revocation changed config file")
+	}
+	select {
+	case <-snapshots:
+		t.Fatal("refused revocation triggered reload")
+	default:
 	}
 }
 

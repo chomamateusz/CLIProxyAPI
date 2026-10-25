@@ -717,6 +717,8 @@ type websocketDirectCaptureExecutor struct {
 	requiredUpstreamWebsocket []bool
 	done                      chan struct{}
 	doneOnce                  sync.Once
+	duplexMode                bool
+	duplexForwarded           atomic.Int32
 }
 
 type websocketCanonicalRollbackExecutor struct {
@@ -824,6 +826,38 @@ func (e *websocketDirectCaptureExecutor) ExecuteStream(ctx context.Context, auth
 	count := len(e.payloads)
 	failStatus := e.failStatus
 	e.mu.Unlock()
+	if e.duplexMode {
+		chunks := make(chan coreexecutor.StreamChunk, 4)
+		e.duplexForwarded.Add(1)
+		chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.created","response":{"id":"resp-duplex"}}`)}
+		chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"id":"resp-duplex","output":[]}}`)}
+		go func() {
+			defer close(chunks)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case input, ok := <-coreexecutor.WebsocketInputFromContext(ctx):
+					if !ok {
+						return
+					}
+					if errorPayload, err := coreexecutor.AuthorizeWebsocketTurn(ctx, input.Payload); err != nil {
+						return
+					} else if len(errorPayload) > 0 {
+						chunks <- coreexecutor.StreamChunk{Payload: errorPayload}
+						continue
+					}
+					if !coreexecutor.WebsocketAuthEnabled(ctx, auth.ID) {
+						chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"error","status":403,"error":{"message":"model is not allowed for this API key"}}`)}
+						continue
+					}
+					e.duplexForwarded.Add(1)
+					chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"id":"resp-duplex","output":[]}}`)}
+				}
+			}
+		}()
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}
 
 	chunks := make(chan coreexecutor.StreamChunk, 2)
 	if failStatus > 0 {
@@ -7831,6 +7865,64 @@ func TestResponsesWebsocketTurnRejectsTightenedModelPolicy(t *testing.T) {
 	provider.policy.Store(&sdkaccess.KeyPolicy{Models: []string{"other"}})
 	if err := h.authenticateResponsesWebsocketTurn(c, request, []byte(`{"model":"allowed"}`), "allowed", false); err == nil || err.StatusCode != http.StatusForbidden {
 		t.Fatalf("tightened turn policy: %v", err)
+	}
+}
+
+func TestResponsesWebsocketDuplexRejectsNewlyExcludedAliasTarget(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &websocketDirectCaptureExecutor{duplexMode: true}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	manager.SetConfig(&internalconfig.Config{CodexKey: []internalconfig.CodexKey{{APIKey: "upstream-test-key", Models: []internalconfig.CodexModel{{Name: "gpt-5.4", Alias: "friendly"}}}}})
+	credential := &coreauth.Auth{ID: "duplex-alias-auth", Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{
+		coreauth.AttributeAPIKey: "upstream-test-key", "websockets": "true",
+	}}
+	if _, err := manager.Register(context.Background(), credential); err != nil {
+		t.Fatal(err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(credential.ID, credential.Provider, []*registry.ModelInfo{{ID: "friendly"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(credential.ID) })
+	provider := &revocableWebsocketAccessProvider{}
+	provider.policy.Store(&sdkaccess.KeyPolicy{Models: []string{"friendly"}})
+	access := sdkaccess.NewManager()
+	access.SetProviders([]sdkaccess.Provider{provider})
+	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexResponseSteering: true}, manager))
+	h.AccessManager = access
+	router := gin.New()
+	router.GET("/v1/responses", h.ResponsesWebsocket)
+	server := httptest.NewServer(router)
+	defer server.Close()
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses", http.Header{"Authorization": []string{"Bearer key-1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	turn := []byte(`{"type":"response.create","model":"friendly","input":[{"type":"message","role":"user","content":"hi"}]}`)
+	if err := conn.WriteMessage(websocket.TextMessage, turn); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		_, msg, errRead := conn.ReadMessage()
+		if errRead != nil {
+			t.Fatal(errRead)
+		}
+		if gjson.GetBytes(msg, "type").String() == "response.completed" {
+			break
+		}
+	}
+	provider.policy.Store(&sdkaccess.KeyPolicy{Models: []string{"friendly"}, ExcludedModels: []string{"gpt-5.4"}})
+	if err := conn.WriteMessage(websocket.TextMessage, turn); err != nil {
+		t.Fatal(err)
+	}
+	_, msg, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	if gjson.GetBytes(msg, "type").String() != "error" || executor.duplexForwarded.Load() != 1 {
+		t.Fatalf("tightened turn = %s, forwarded = %d", msg, executor.duplexForwarded.Load())
 	}
 }
 
