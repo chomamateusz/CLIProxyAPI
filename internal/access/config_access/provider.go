@@ -17,14 +17,14 @@ func Register(cfg *sdkconfig.SDKConfig) {
 	}
 
 	keys := normalizeKeys(cfg.APIKeys)
-	if len(keys) == 0 {
+	if len(keys) == 0 && len(cfg.KeyIssuerKeys) == 0 {
 		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
 		return
 	}
 
 	sdkaccess.RegisterProvider(
 		sdkaccess.AccessProviderTypeConfigAPIKey,
-		newPolicyProvider(sdkaccess.DefaultAccessProviderName, keys, cfg.APIKeyPolicies),
+		newIssuerPolicyProvider(sdkaccess.DefaultAccessProviderName, keys, cfg),
 	)
 }
 
@@ -58,7 +58,7 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 		return nil, sdkaccess.NewNotHandledError()
 	}
 	if len(p.keys) == 0 {
-		return nil, sdkaccess.NewNotHandledError()
+		return nil, sdkaccess.NewInvalidCredentialError()
 	}
 	authHeader := r.Header.Get("Authorization")
 	authHeaderGoogle := r.Header.Get("X-Goog-Api-Key")
@@ -90,7 +90,7 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 		if candidate.value == "" {
 			continue
 		}
-		if _, ok := p.keys[candidate.value]; ok {
+		if _, ok := p.keys[candidate.value]; ok && !keyPolicyExpired(p.policies[candidate.value]) {
 			return &sdkaccess.Result{
 				Provider:  p.Identifier(),
 				Principal: candidate.value,

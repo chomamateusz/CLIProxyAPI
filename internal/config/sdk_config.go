@@ -95,6 +95,7 @@ type SDKConfig struct {
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
 	APIKeyPolicies []access.KeyPolicy `yaml:"-" json:"-"`
+	KeyIssuerKeys  []KeyIssuerKey     `yaml:"key-issuer-keys,omitempty" json:"-"`
 
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).

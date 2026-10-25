@@ -295,7 +295,6 @@ func (h *Handler) SetPostAuthPersistHook(hook coreauth.PostAuthHook) {
 }
 
 // Middleware enforces access control for management endpoints.
-// All requests (local and remote) require a valid management key.
 // Additionally, remote access requires allow-remote-management=true.
 func (h *Handler) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -321,9 +320,15 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			provided = c.GetHeader("X-Management-Key")
 		}
 
-		allowed, statusCode, errMsg := h.AuthenticateManagementKey(clientIP, localClient, provided)
+		principal := managementPrincipal{Kind: "management", Name: "management"}
+		allowed, statusCode, errMsg := h.authenticateManagementPrincipal(clientIP, localClient, provided, &principal)
 		if !allowed {
 			c.AbortWithStatusJSON(statusCode, gin.H{"error": errMsg})
+			return
+		}
+		c.Set(managementPrincipalKey, principal)
+		if !principal.allows(c) {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "forbidden", "message": "issuer keys may only manage client keys"})
 			return
 		}
 		c.Next()
@@ -331,8 +336,11 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 }
 
 // AuthenticateManagementKey verifies the provided management key for the given client.
-// It mirrors the behaviour of Middleware() so non-HTTP callers can reuse the same logic.
 func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, provided string) (bool, int, string) {
+	return h.authenticateManagementPrincipal(clientIP, localClient, provided, nil)
+}
+
+func (h *Handler) authenticateManagementPrincipal(clientIP string, localClient bool, provided string, principal *managementPrincipal) (bool, int, string) {
 	const maxFailures = 5
 	const banDuration = 30 * time.Minute
 
@@ -345,10 +353,12 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 	var (
 		allowRemote bool
 		secretHash  string
+		issuers     []config.KeyIssuerKey
 	)
 	if cfg != nil {
 		allowRemote = cfg.RemoteManagement.AllowRemote
 		secretHash = cfg.RemoteManagement.SecretKey
+		issuers = append([]config.KeyIssuerKey(nil), cfg.KeyIssuerKeys...)
 	}
 	h.mu.Unlock()
 	if h.allowRemoteOverride {
@@ -400,7 +410,7 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		h.attemptsMu.Unlock()
 	}
 
-	if secretHash == "" && envSecret == "" {
+	if secretHash == "" && envSecret == "" && len(issuers) == 0 {
 		return false, http.StatusForbidden, "remote management key not set"
 	}
 
@@ -424,6 +434,15 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 	}
 
 	if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
+		if principal != nil {
+			for _, issuer := range issuers {
+				if subtle.ConstantTimeCompare([]byte(provided), []byte(issuer.Key)) == 1 {
+					*principal = managementPrincipal{Kind: "issuer", Name: issuer.IssuerName()}
+					reset()
+					return true, 0, ""
+				}
+			}
+		}
 		fail()
 		return false, http.StatusUnauthorized, "invalid management key"
 	}

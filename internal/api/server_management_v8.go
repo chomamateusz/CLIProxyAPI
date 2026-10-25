@@ -18,6 +18,10 @@ func (s *Server) registerManagementV8Routes() {
 	v8.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware(), func(c *gin.Context) {
 		c.Set(management.ConfigV8ContextKey, true)
 	})
+	v8.GET("/issued-keys", s.mgmt.IssuedKeys)
+	v8.POST("/issued-keys", s.mgmt.IssuedKeys)
+	v8.DELETE("/issued-keys", s.mgmt.IssuedKeys)
+	v8.DELETE("/issued-keys/:name", s.mgmt.IssuedKeys)
 	v8.GET("/config", s.mgmt.ConfigV8)
 	v8.PUT("/config", s.mgmt.ConfigV8)
 	v8.PATCH("/config", s.mgmt.ConfigV8)

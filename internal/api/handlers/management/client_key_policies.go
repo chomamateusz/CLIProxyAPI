@@ -20,6 +20,8 @@ type clientKeyPolicyLists struct {
 }
 
 type clientKeyPolicyEntry struct {
+	IssuedBy  string `json:"issued-by" yaml:"issued-by"`
+	ExpiresAt string `json:"expires-at" yaml:"expires-at"`
 	Index     int    `json:"index"`
 	Name      string `json:"name"`
 	HasPolicy bool   `json:"has_policy"`
@@ -76,6 +78,12 @@ func (h *Handler) ClientKeyPolicies(c *gin.Context) {
 			if entry.HasPolicy {
 				if name := configV8Node(node, []string{"name"}); name != nil {
 					entry.Name = name.Value
+				}
+				if issuedBy := configV8Node(node, []string{"issued-by"}); issuedBy != nil {
+					entry.IssuedBy = issuedBy.Value
+				}
+				if expiresAt := configV8Node(node, []string{"expires-at"}); expiresAt != nil {
+					entry.ExpiresAt = expiresAt.Value
 				}
 				if err = node.Decode(&entry.clientKeyPolicyLists); err != nil {
 					clientKeyPolicyError(c, http.StatusInternalServerError, "invalid_config", "Could not read client key policies")

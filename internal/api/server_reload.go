@@ -135,9 +135,9 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 
 	prevSecretEmpty := true
 	if oldCfg != nil {
-		prevSecretEmpty = oldCfg.RemoteManagement.SecretKey == ""
+		prevSecretEmpty = oldCfg.RemoteManagement.SecretKey == "" && len(oldCfg.KeyIssuerKeys) == 0
 	}
-	newSecretEmpty := cfg.RemoteManagement.SecretKey == ""
+	newSecretEmpty := cfg.RemoteManagement.SecretKey == "" && len(cfg.KeyIssuerKeys) == 0
 	if s.envManagementSecret {
 		s.registerManagementRoutes()
 		if s.managementRoutesEnabled.CompareAndSwap(false, true) {

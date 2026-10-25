@@ -8,6 +8,9 @@ import (
 
 type KeyPolicy struct {
 	Key                 string   `yaml:"key" json:"-"`
+	IssuedBy            string   `yaml:"issued-by,omitempty" json:"issued-by,omitempty"`
+	CreatedAt           string   `yaml:"created-at,omitempty" json:"created-at,omitempty"`
+	ExpiresAt           string   `yaml:"expires-at,omitempty" json:"expires-at,omitempty"`
 	Name                string   `yaml:"name,omitempty" json:"name,omitempty"`
 	Models              []string `yaml:"models,omitempty" json:"models,omitempty"`
 	ExcludedModels      []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`

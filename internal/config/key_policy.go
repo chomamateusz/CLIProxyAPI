@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"gopkg.in/yaml.v3"
@@ -25,6 +26,11 @@ func splitAPIKeyPolicies(root *yaml.Node) ([]access.KeyPolicy, error) {
 		key := yamlPath(entry, "key")
 		if key == nil || key.Kind != yaml.ScalarNode || key.Tag != "!!str" || strings.TrimSpace(policy.Key) == "" {
 			return nil, fmt.Errorf("api-keys[%d]: policy requires a non-empty string key", i)
+		}
+		if policy.ExpiresAt != "" {
+			if _, err := time.Parse(time.RFC3339, policy.ExpiresAt); err != nil {
+				return nil, fmt.Errorf("api-keys[%d]: invalid expires-at", i)
+			}
 		}
 		policies = append(policies, policy)
 		keys.Content[i] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: policy.Key}
