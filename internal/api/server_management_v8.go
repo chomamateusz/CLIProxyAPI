@@ -23,6 +23,10 @@ func (s *Server) registerManagementV8Routes() {
 	v8.PATCH("/config", s.mgmt.ConfigV8)
 	v8.GET("/config.yaml", s.mgmt.ConfigV8)
 	v8.PUT("/config.yaml", s.mgmt.ConfigV8)
+	v8.GET("/client-key-policies", s.mgmt.ClientKeyPolicies)
+	v8.GET("/client-key-policies/:name", s.mgmt.ClientKeyPolicies)
+	v8.PUT("/client-key-policies/:name", s.mgmt.ClientKeyPolicies)
+	v8.PATCH("/client-key-policies/:name", s.mgmt.ClientKeyPolicies)
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 		v8.Handle(method, "/config/*path", s.mgmt.ConfigV8)
 	}

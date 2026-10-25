@@ -98,19 +98,22 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"latest-version": version})
 }
 
-func WriteConfig(path string, data []byte) error {
+func WriteConfig(path string, data []byte, preserveLayout ...bool) error {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return err
 	}
-	if len(doc.Content) > 0 && config.IsV8ConfigLayout(doc.Content[0]) {
+	keepLayout := len(preserveLayout) > 0 && preserveLayout[0]
+	if !keepLayout && len(doc.Content) > 0 && config.IsV8ConfigLayout(doc.Content[0]) {
 		var err error
 		data, _, err = config.NormalizeConfigLayout(data, true)
 		if err != nil {
 			return err
 		}
 	}
-	data = config.NormalizeCommentIndentation(data)
+	if !keepLayout {
+		data = config.NormalizeCommentIndentation(data)
+	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
