@@ -106,6 +106,13 @@ func (h *Handler) HandleHangup(c *gin.Context) {
 		selected = selectedAuth
 		temporarySelection = selection != nil
 	}
+	if errPolicy := liveSessionPolicyError(ctx, session.model, selected); errPolicy != nil {
+		if temporarySelection && activeSelection != nil {
+			activeSelection.End("policy_rejected")
+		}
+		writeSelectionError(c, errPolicy)
+		return
+	}
 	var selectionRelease func()
 	if activeSelection != nil {
 		attemptCtx, releaseAttempt, errAttempt := activeSelection.AttemptContext(ctx)

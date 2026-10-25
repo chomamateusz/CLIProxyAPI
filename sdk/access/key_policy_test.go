@@ -20,10 +20,32 @@ func TestKeyPolicyAllowsModel(t *testing.T) {
 		{"empty wildcard", KeyPolicy{Models: []string{"gpt*5"}}, "gpt5", true},
 		{"literal question mark", KeyPolicy{Models: []string{"gpt-?"}}, "gpt-5", false},
 		{"literal brackets", KeyPolicy{Models: []string{"[ab]"}}, "a", false},
+		{"suffix exact allow", KeyPolicy{Models: []string{"gpt-5"}}, "gpt-5(high)", true},
+		{"suffix exact deny", KeyPolicy{ExcludedModels: []string{"gpt-5"}}, "gpt-5(high)", false},
+		{"prefixed exact allow", KeyPolicy{Models: []string{"gpt-5"}}, "team/gpt-5(high)", true},
+		{"prefixed exact deny", KeyPolicy{ExcludedModels: []string{"gpt-5"}}, "team/gpt-5(high)", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.policy.AllowsModel(tc.model); got != tc.want {
 				t.Fatalf("AllowsModel() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestKeyPolicyAllowsModelRoute(t *testing.T) {
+	for _, tc := range []struct {
+		name, requested, resolved string
+		policy                    KeyPolicy
+		want                      bool
+	}{
+		{"wildcard alias cannot widen", "claude-fable-5-dd-5.5-tpg", "gpt-5.5", KeyPolicy{Models: []string{"claude-*"}}, false},
+		{"exact alias can select resolved", "claude-fable-5-dd-5.5-tpg", "gpt-5.5", KeyPolicy{Models: []string{"claude-fable-5-dd-5.5-tpg"}}, true},
+		{"resolved exclusion wins", "claude-fable-5-dd-supo-edualc", "claude-opus", KeyPolicy{ExcludedModels: []string{"claude-opus*"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.policy.AllowsModelRoute(tc.requested, tc.resolved); got != tc.want {
+				t.Fatalf("AllowsModelRoute() = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -47,6 +69,7 @@ func TestKeyPolicyAllowsCredential(t *testing.T) {
 		{"synthesized label", KeyPolicy{Credentials: []string{"work"}}, "", "api-id", "WORK", true},
 		{"file ignores label", KeyPolicy{Credentials: []string{"work"}}, "other.json", "id", "work", false},
 		{"path not matched", KeyPolicy{Credentials: []string{"/auths/*"}}, "/auths/work.json", "id", "", false},
+		{"home id stem denied", KeyPolicy{ExcludedCredentials: []string{"work"}}, "", "work.json", "unrelated", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.policy.AllowsCredential(tc.file, tc.id, tc.label); got != tc.want {

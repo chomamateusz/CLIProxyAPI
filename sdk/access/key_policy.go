@@ -4,6 +4,8 @@ import (
 	"context"
 	"path/filepath"
 	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 )
 
 type KeyPolicy struct {
@@ -19,7 +21,37 @@ type KeyPolicy struct {
 }
 
 func (p *KeyPolicy) AllowsModel(model string) bool {
-	return p == nil || policyAllows(p.Models, p.ExcludedModels, []string{model})
+	return p.AllowsModelRoute(model, model)
+}
+
+func (p *KeyPolicy) AllowsModelRoute(requested, resolved string) bool {
+	if p == nil {
+		return true
+	}
+	requested = strings.TrimSpace(thinking.ParseSuffix(requested).ModelName)
+	resolved = strings.TrimSpace(thinking.ParseSuffix(resolved).ModelName)
+	names := []string{requested, resolved}
+	resolvedNames := []string{resolved}
+	if index := strings.LastIndexByte(requested, '/'); index >= 0 && index+1 < len(requested) {
+		names = append(names, requested[index+1:])
+	}
+	if index := strings.LastIndexByte(resolved, '/'); index >= 0 && index+1 < len(resolved) {
+		base := resolved[index+1:]
+		names = append(names, base)
+		resolvedNames = append(resolvedNames, base)
+	}
+	if policyMatches(p.ExcludedModels, names) {
+		return false
+	}
+	if len(p.Models) == 0 || policyMatches(p.Models, resolvedNames) {
+		return true
+	}
+	for _, name := range p.Models {
+		if !strings.Contains(name, "*") && strings.EqualFold(name, requested) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *KeyPolicy) AllowsCredential(fileName, id, label string) bool {
@@ -27,6 +59,12 @@ func (p *KeyPolicy) AllowsCredential(fileName, id, label string) bool {
 		return true
 	}
 	names := []string{id}
+	if base := filepath.Base(id); base != "" {
+		names = append(names, base)
+		if strings.HasSuffix(strings.ToLower(base), ".json") {
+			names = append(names, base[:len(base)-5])
+		}
+	}
 	if fileName != "" {
 		base := filepath.Base(fileName)
 		names = append(names, base)
@@ -40,17 +78,18 @@ func (p *KeyPolicy) AllowsCredential(fileName, id, label string) bool {
 }
 
 func policyAllows(allow, deny, names []string) bool {
-	matches := func(patterns []string) bool {
-		for _, pattern := range patterns {
-			for _, name := range names {
-				if wildcardMatch(pattern, name) {
-					return true
-				}
+	return (len(allow) == 0 || policyMatches(allow, names)) && !policyMatches(deny, names)
+}
+
+func policyMatches(patterns, names []string) bool {
+	for _, pattern := range patterns {
+		for _, name := range names {
+			if wildcardMatch(pattern, name) {
+				return true
 			}
 		}
-		return false
 	}
-	return (len(allow) == 0 || matches(allow)) && !matches(deny)
+	return false
 }
 
 func wildcardMatch(pattern, value string) bool {

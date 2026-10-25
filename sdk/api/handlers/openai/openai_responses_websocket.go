@@ -311,6 +311,9 @@ func (h *OpenAIResponsesAPIHandler) authenticateResponsesWebsocketTurn(c *gin.Co
 		}
 	}
 	if result != nil && c != nil {
+		if result.Policy != nil && !result.Policy.AllowsModel(strings.TrimSpace(gjson.GetBytes(authBody, "model").String())) {
+			return &interfaces.ErrorMessage{StatusCode: http.StatusForbidden, Error: errors.New("model is not allowed for this API key")}
+		}
 		c.Set("userApiKey", result.Principal)
 		c.Set("accessProvider", result.Provider)
 		c.Set(access.KeyPolicyGinKey, result.Policy)
@@ -801,7 +804,12 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			cliCtx = cliproxyexecutor.WithWebsocketInput(cliCtx, duplexInput)
 			cliCtx = cliproxyexecutor.WithWebsocketAuthCheck(cliCtx, func(authID string) bool {
 				current, ok := sessionAuthByID(authID)
-				return ok && current != nil && !current.Disabled && current.Status != coreauth.StatusDisabled
+				if !ok || current == nil || current.Disabled || current.Status == coreauth.StatusDisabled {
+					return false
+				}
+				policy, _ := c.Get(access.KeyPolicyGinKey)
+				keyPolicy, _ := policy.(*access.KeyPolicy)
+				return keyPolicy == nil || keyPolicy.AllowsCredential(current.FileName, current.ID, current.Label)
 			})
 			cliCtx = cliproxyexecutor.WithWebsocketTurnAuthorizer(cliCtx, func(turnPayload []byte) ([]byte, error) {
 				errAuth := h.authenticateResponsesWebsocketTurn(c, upgradeRequest, turnPayload, modelName, false)

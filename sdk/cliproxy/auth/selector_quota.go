@@ -22,7 +22,7 @@ func (s *MostUsedSelector) Pick(ctx context.Context, provider, model string, opt
 
 func pickQuotaAuth(ctx context.Context, provider, model string, auths []*Auth, mostUsed bool) (*Auth, error) {
 	now := time.Now()
-	available, err := getSelectorAvailableAuths(ctx, auths, provider, model, now)
+	available, err := getSelectorAvailableAuthsAcrossPriorities(ctx, auths, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
@@ -51,6 +51,7 @@ func pickQuotaAuth(ctx context.Context, provider, model string, auths []*Auth, m
 	if len(ordered) == 0 {
 		return nil, newAuthUnavailableError(earliest, now)
 	}
+	ordered = highestPriorityAuths(ordered)
 	ordered = preferCodexWebsocketAuths(ctx, provider, ordered)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		left, leftSampled := samples[ordered[i]]

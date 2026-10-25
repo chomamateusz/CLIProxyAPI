@@ -72,7 +72,7 @@ func (m *Manager) PluginSchedulerWantsAcrossPriorities() bool {
 
 func isBuiltInSelector(selector Selector) bool {
 	switch selector.(type) {
-	case *RoundRobinSelector, *WeightedRoundRobinSelector, *FillFirstSelector:
+	case *RoundRobinSelector, *WeightedRoundRobinSelector, *FillFirstSelector, *NearestResetSelector, *MostUsedSelector:
 		return true
 	default:
 		return false
@@ -106,7 +106,7 @@ func credentialPolicyFromContext(ctx context.Context) string {
 }
 
 func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecutor.Options) authSelectionEligibility {
-	eligibility := authSelectionEligibility{disallowFreeAuth: disallowFreeAuthFromMetadata(opts.Metadata), credentialFilter: credentialFilterFromContext(ctx)}
+	eligibility := authSelectionEligibility{disallowFreeAuth: disallowFreeAuthFromMetadata(opts.Metadata), credentialFilter: credentialFilterForRequest(ctx)}
 	if ctx != nil {
 		eligibility.requiredKind, _ = ctx.Value(requiredAuthKindContextKey{}).(string)
 		eligibility.credentialPolicy, _ = ctx.Value(credentialPolicyContextKey{}).(string)
@@ -633,8 +633,13 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 // or scheduler additionally receives lower priority tiers.
 func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time, schedulerAcross bool) (priorityAuths, selectorAuths []*Auth, err error) {
 	_, sessionAffinity := selector.(*SessionAffinitySelector)
+	quotaSelector := false
+	switch selector.(type) {
+	case *NearestResetSelector, *MostUsedSelector:
+		quotaSelector = true
+	}
 
-	if !sessionAffinity && !schedulerAcross {
+	if !sessionAffinity && !quotaSelector && !schedulerAcross {
 		priorityAuths, err = m.availableAuthsForRouteModel(auths, provider, routeModel, now)
 		if err != nil {
 			return nil, nil, err
@@ -657,7 +662,7 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 		priorityAuths = highestPriorityAuths(allAuths)
 	}
 
-	if sessionAffinity {
+	if sessionAffinity || quotaSelector {
 		selectorAuths = allAuths
 	} else {
 		selectorAuths = highestPriorityAuths(allAuths)
@@ -666,6 +671,10 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 }
 
 func selectionArgForSelector(selector Selector, routeModel string) string {
+	switch selector.(type) {
+	case *NearestResetSelector, *MostUsedSelector:
+		return routeModel
+	}
 	if isBuiltInSelector(selector) {
 		return ""
 	}

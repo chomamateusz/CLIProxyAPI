@@ -408,6 +408,11 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		writeLiveError(c, http.StatusServiceUnavailable, "Codex auth unavailable")
 		return
 	}
+	if errPolicy := liveSessionPolicyError(ctx, session.model, selected); errPolicy != nil {
+		consumeSession = true
+		writeSelectionError(c, errPolicy)
+		return
+	}
 
 	if selection != nil {
 		attemptCtx, releaseAttempt, errAttempt := selection.AttemptContext(ctx)

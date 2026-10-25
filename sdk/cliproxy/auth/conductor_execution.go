@@ -533,6 +533,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		execCtx = newUpstreamAttemptContext(execCtx)
 
 		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		models = filterPolicyExecutionModels(execCtx, routeModel, models)
 		if len(models) == 0 {
 			continue
 		}
@@ -747,6 +748,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		execCtx = newUpstreamAttemptContext(execCtx)
 
 		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		models = filterPolicyExecutionModels(execCtx, routeModel, models)
 		if len(models) == 0 {
 			continue
 		}
@@ -1065,6 +1067,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 		execCtx = newUpstreamAttemptContext(execCtx)
 		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(auth, routeModel)
+		models = filterPolicyExecutionModels(execCtx, routeModel, models)
 		// Home owns dispatched credential availability; only local selections need state filtering.
 		if selection == nil {
 			models = m.filterExecutionModels(auth, routeModel, models, pooled)

@@ -55,6 +55,7 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		}
 	}
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
+	ctx = context.WithValue(ctx, liveRequestedModelKey{}, requestedModel)
 	ctx = coreexecutor.WithDownstreamWebsocket(ctx)
 	selectionOpts := coreexecutor.Options{Headers: liveSelectionHeaders(c)}
 	ctx = handlers.EnrichContextWithSessionHierarchy(ctx, selectionOpts.Headers, nil, nil)
@@ -68,6 +69,13 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 			selection.End("missing_auth")
 		}
 		writeRealtimeError(c, http.StatusServiceUnavailable, "Codex auth unavailable", "server_error", "codex_auth_unavailable")
+		return
+	}
+	if errPolicy := liveSessionPolicyError(ctx, selectionModel, selected); errPolicy != nil {
+		if selection != nil {
+			selection.End("policy_rejected")
+		}
+		writeSelectionError(c, errPolicy)
 		return
 	}
 	if selection != nil && selection.CanonicalSessionID != "" {

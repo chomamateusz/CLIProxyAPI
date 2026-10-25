@@ -972,8 +972,10 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		return nil, errRetained
 	}
 	if retainedOK {
-		if filter := credentialFilterFromContext(ctx); filter != nil && !filter(retained.CloneAuthForRoute(requestedModel)) {
-			return nil, &Error{Code: "auth_not_found", Message: "no eligible auth available", HTTPStatus: http.StatusServiceUnavailable}
+		if filter := credentialFilterForRequest(ctx); filter != nil && !filter(retained.CloneAuthForRoute(requestedModel)) {
+			rejected := retained.CloneAuth()
+			retained.End("policy_rejected")
+			return m.retryHomeAfterPolicyReject(ctx, model, opts, rejected)
 		}
 		return retained, nil
 	}
@@ -1131,9 +1133,9 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 			return nil, &Error{Code: "invalid_auth", Message: "home returned invalid auth payload", HTTPStatus: http.StatusBadGateway}
 		}
 	}
-	if filter := credentialFilterFromContext(ctx); filter != nil && !filter(&auth) {
+	if filter := credentialFilterForRequest(ctx); filter != nil && !filter(&auth) {
 		endScope()
-		return nil, &Error{Code: "auth_not_found", Message: "no eligible auth available", HTTPStatus: http.StatusServiceUnavailable}
+		return m.retryHomeAfterPolicyReject(ctx, model, opts, &auth)
 	}
 	observedModel := canonicalHomeDispatchModel(dispatch.Model, requestedModel)
 	if envelope.Present {
@@ -1240,6 +1242,28 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	return selection, nil
 }
 
+func (m *Manager) retryHomeAfterPolicyReject(ctx context.Context, model string, opts cliproxyexecutor.Options, rejected *Auth) (*HomeDispatchSelection, error) {
+	if rejected == nil || rejected.ID == "" || pinnedAuthIDFromMetadata(opts.Metadata) != "" {
+		return nil, &Error{Code: "auth_not_found", Message: "no eligible auth available", HTTPStatus: http.StatusServiceUnavailable}
+	}
+	excluded := homeExcludedAuthIDsFromMetadata(opts.Metadata)
+	if len(excluded) >= 16 {
+		return nil, &Error{Code: "auth_not_found", Message: "no eligible auth available", HTTPStatus: http.StatusServiceUnavailable}
+	}
+	for _, id := range excluded {
+		if id == rejected.ID {
+			return nil, &Error{Code: "auth_not_found", Message: "no eligible auth available", HTTPStatus: http.StatusServiceUnavailable}
+		}
+	}
+	metadata := make(map[string]any, len(opts.Metadata)+1)
+	for key, value := range opts.Metadata {
+		metadata[key] = value
+	}
+	metadata[ExcludedAuthIDsMetadataKey] = append(excluded, rejected.ID)
+	opts.Metadata = metadata
+	return m.pickHomeDispatchSelection(ctx, model, opts)
+}
+
 func homeRetryRoundFromMetadata(metadata map[string]any) int {
 	if metadata == nil {
 		return 0
@@ -1292,6 +1316,9 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 	m.mu.RLock()
 	for _, auth := range m.auths {
 		if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+			continue
+		}
+		if filter := credentialFilterForRequest(ctx); filter != nil && !filter(auth) {
 			continue
 		}
 		if pinnedAuthID != "" && auth.ID != pinnedAuthID {

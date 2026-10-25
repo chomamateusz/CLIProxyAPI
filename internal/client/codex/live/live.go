@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -215,6 +216,7 @@ func (h *Handler) Handle(c *gin.Context) {
 	mediaRetained := false
 
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
+	ctx = context.WithValue(ctx, liveRequestedModelKey{}, model)
 	selectionOpts := coreexecutor.Options{
 		Headers:         liveSelectionHeaders(c),
 		OriginalRequest: body,
@@ -230,6 +232,13 @@ func (h *Handler) Handle(c *gin.Context) {
 			selection.End("missing_auth")
 		}
 		writeLiveError(c, http.StatusServiceUnavailable, "Codex auth unavailable")
+		return
+	}
+	if errPolicy := liveSessionPolicyError(ctx, model, selected); errPolicy != nil {
+		if selection != nil {
+			selection.End("policy_rejected")
+		}
+		writeSelectionError(c, errPolicy)
 		return
 	}
 	if selection != nil && selection.CanonicalSessionID != "" {
@@ -487,6 +496,9 @@ func mediaCredentialName(selected *auth.Auth, authIndex string) string {
 }
 
 func (h *Handler) selectOAuth(ctx context.Context, model string, opts coreexecutor.Options) (*auth.HomeDispatchSelection, *auth.Auth, error) {
+	if errPolicy := liveSessionPolicyError(ctx, model, nil); errPolicy != nil {
+		return nil, nil, errPolicy
+	}
 	var selection *auth.HomeDispatchSelection
 	var selected *auth.Auth
 	var errSelect error
@@ -503,6 +515,24 @@ func (h *Handler) selectOAuth(ctx context.Context, model string, opts coreexecut
 	}
 	return selection, selected, errSelect
 }
+
+func liveSessionPolicyError(ctx context.Context, model string, selected *auth.Auth) error {
+	if policy := access.KeyPolicyFromContext(ctx); policy != nil {
+		requested, _ := ctx.Value(liveRequestedModelKey{}).(string)
+		if requested == "" {
+			requested = model
+		}
+		if !policy.AllowsModelRoute(requested, model) {
+			return &auth.Error{Code: "model_not_allowed", Message: "model is not allowed for this API key", HTTPStatus: http.StatusForbidden}
+		}
+		if selected != nil && !policy.AllowsCredential(selected.FileName, selected.ID, selected.Label) {
+			return &auth.Error{Code: "auth_not_found", Message: "no eligible auth available", HTTPStatus: http.StatusForbidden}
+		}
+	}
+	return nil
+}
+
+type liveRequestedModelKey struct{}
 
 var errBodyTooLarge = errors.New("Codex live request body too large")
 

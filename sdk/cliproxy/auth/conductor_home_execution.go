@@ -138,6 +138,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		}
 		// Home owns credential availability; execute its dispatch without local state filtering.
 		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(auth, routeModel)
+		models = filterPolicyExecutionModels(execCtx, routeModel, models)
 		if aliasResult.ForceMapping && responseAlias != "" {
 			aliasResult.OriginalAlias = responseAlias
 		}

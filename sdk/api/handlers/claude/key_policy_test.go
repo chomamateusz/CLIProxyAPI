@@ -21,7 +21,7 @@ func TestKeyPolicyChecksClientModelBeforeCloakingAlias(t *testing.T) {
 	for _, mode := range []string{"messages", "stream", "count"} {
 		for _, allowAlias := range []bool{false, true} {
 			name := mode + "/denied"
-			allowed := target
+			allowed := "other-model"
 			if allowAlias {
 				name = mode + "/allowed"
 				allowed = alias
@@ -55,6 +55,36 @@ func TestKeyPolicyChecksClientModelBeforeCloakingAlias(t *testing.T) {
 					if recorder.Code != http.StatusForbidden || response.Error.Code != "model_not_allowed" || response.Error.Message != "model "+alias+" is not allowed for this API key" {
 						t.Fatalf("unexpected policy response: %s", recorder.Body.String())
 					}
+				}
+			})
+		}
+	}
+}
+
+func TestKeyPolicyRejectsCloakedWildcardAndExcludedTarget(t *testing.T) {
+	for _, tc := range []struct {
+		target string
+		policy access.KeyPolicy
+	}{
+		{"gpt-5.5", access.KeyPolicy{Models: []string{"claude-*"}}},
+		{"claude-opus-5", access.KeyPolicy{ExcludedModels: []string{"claude-opus-*"}}},
+	} {
+		for _, mode := range []string{"messages", "count"} {
+			t.Run(tc.target+"/"+mode, func(t *testing.T) {
+				alias := claudemodels.EnsureClaudeModelIDPrefix(tc.target)
+				base := handlers.NewBaseAPIHandlers(nil, coreauth.NewManager(nil, nil, nil))
+				handler := NewClaudeCodeAPIHandler(base)
+				body, _ := json.Marshal(map[string]any{"model": alias, "messages": []any{}})
+				recorder := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(recorder)
+				c.Request = httptest.NewRequest("POST", "/v1/messages", strings.NewReader(string(body))).WithContext(access.WithKeyPolicy(context.Background(), &tc.policy))
+				if mode == "count" {
+					handler.ClaudeCountTokens(c)
+				} else {
+					handler.ClaudeMessages(c)
+				}
+				if recorder.Code != http.StatusForbidden {
+					t.Fatalf("status = %d, want 403", recorder.Code)
 				}
 			})
 		}

@@ -271,9 +271,27 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
 		if provider == "" {
 			provider = "realtime-client-secret"
 		}
+		policy := authorization.Policy
+		if provider == sdkaccess.DefaultAccessProviderName {
+			if manager == nil {
+				c.AbortWithStatus(http.StatusUnauthorized)
+				return
+			}
+			issuerRequest := c.Request.Clone(c.Request.Context())
+			issuerRequest.Header = c.Request.Header.Clone()
+			issuerRequest.Header.Set("Authorization", "Bearer "+authorization.IssuerPrincipal)
+			result, errIssuer := manager.Authenticate(issuerRequest.Context(), issuerRequest)
+			if errIssuer != nil || result == nil || result.Principal != authorization.IssuerPrincipal || result.Provider != provider {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": gin.H{"message": "Realtime client secret is invalid or expired", "type": "authentication_error", "code": "invalid_realtime_client_secret"}})
+				return
+			}
+			policy = result.Policy
+		}
 		c.Set("userApiKey", principal)
 		c.Set("accessProvider", provider)
+		c.Set(sdkaccess.KeyPolicyGinKey, policy)
 		reqCtx := coreusage.WithAPIKey(c.Request.Context(), principal)
+		reqCtx = sdkaccess.WithKeyPolicy(reqCtx, policy)
 		reqCtx = coreusage.WithAccessProvider(reqCtx, provider)
 		reqCtx = coreusage.WithIsNativeKey(reqCtx, coreusage.IsNativeAccessProvider(provider))
 		c.Request = c.Request.WithContext(reqCtx)

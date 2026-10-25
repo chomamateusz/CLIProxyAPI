@@ -3,8 +3,11 @@ package auth
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
@@ -99,5 +102,49 @@ func TestCredentialFilterHomeSelection(t *testing.T) {
 	}
 	if got := manager.HomeDispatchBundle().registry.FreezeInFlight(time.Now()); len(got.Executions) != 0 {
 		t.Fatal("filtered Home dispatch leaked execution scope")
+	}
+	filenameDispatcher := &fixtureHomeDispatcher{payload: []byte(`{"concurrency":{"accounted":true,"credential_id":"work.json","model":"gpt"},"auth":{"id":"work.json","provider":"codex","label":"unrelated"}}`)}
+	filenameManager := newHomeSelectionTestManager(t, filenameDispatcher)
+	policyCtx := access.WithKeyPolicy(context.Background(), &access.KeyPolicy{ExcludedCredentials: []string{"work"}})
+	selection, err = filenameManager.pickHomeDispatchSelection(policyCtx, "gpt", cliproxyexecutor.Options{})
+	if selection != nil || !errors.As(err, &authErr) || authErr.Code != "auth_not_found" {
+		t.Fatal("Home filename stem bypassed credential policy")
+	}
+}
+
+type policyRetryHomeDispatcher struct {
+	fixtureHomeDispatcher
+	excluded [][]string
+}
+
+func (d *policyRetryHomeDispatcher) RPopAuthWithRetryRoundConstraints(_ context.Context, _ string, _ string, _ http.Header, _ int, _ int, excluded []string, _ string) ([]byte, error) {
+	d.excluded = append(d.excluded, append([]string(nil), excluded...))
+	id := "blocked"
+	if len(excluded) > 0 {
+		id = "allowed"
+	}
+	return []byte(`{"concurrency":{"accounted":true,"credential_id":"` + id + `","model":"gpt"},"auth_index":"` + id + `","auth":{"id":"` + id + `","provider":"codex"}}`), nil
+}
+
+func TestHomePolicyRepopExcludesRejectedCredential(t *testing.T) {
+	dispatcher := &policyRetryHomeDispatcher{}
+	manager := newHomeSelectionTestManager(t, dispatcher)
+	manager.RegisterExecutor(schedulerTestExecutor{provider: "codex"})
+	ctx := access.WithKeyPolicy(context.Background(), &access.KeyPolicy{Credentials: []string{"allowed"}})
+	selection, err := manager.pickHomeDispatchSelection(ctx, "gpt", cliproxyexecutor.Options{})
+	if err != nil || selection == nil || selection.CloneAuth().ID != "allowed" {
+		t.Fatalf("Home selection = %v, %v", selection, err)
+	}
+	selection.End("test_complete")
+	if len(dispatcher.excluded) != 2 || len(dispatcher.excluded[1]) != 1 || dispatcher.excluded[1][0] != "blocked" {
+		t.Fatalf("Home exclusions = %v", dispatcher.excluded)
+	}
+}
+
+func TestPolicyFiltersResolvedExecutionModels(t *testing.T) {
+	ctx := access.WithKeyPolicy(context.Background(), &access.KeyPolicy{Models: []string{"gpt-*"}, ExcludedModels: []string{"gpt-5"}})
+	models := filterPolicyExecutionModels(ctx, "alias", []string{"gpt-5(high)", "gpt-6", "claude-opus"})
+	if len(models) != 1 || models[0] != "gpt-6" {
+		t.Fatalf("resolved model filtering = %v", models)
 	}
 }

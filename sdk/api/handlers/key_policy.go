@@ -34,6 +34,13 @@ func WithClientRequestedModel(ctx context.Context, model string) context.Context
 	return context.WithValue(ctx, clientRequestedModelContextKey{}, model)
 }
 
+func withClientRequestedModelIfUnset(ctx context.Context, model string) context.Context {
+	if _, ok := ctx.Value(clientRequestedModelContextKey{}).(string); ok {
+		return ctx
+	}
+	return WithClientRequestedModel(ctx, model)
+}
+
 func inheritKeyPolicy(ctx context.Context, c *gin.Context) context.Context {
 	if c == nil {
 		return ctx
@@ -57,19 +64,30 @@ func applyKeyPolicy(ctx context.Context, model string) (context.Context, *interf
 	if policy == nil {
 		return ctx, nil
 	}
-	if requested, ok := ctx.Value(clientRequestedModelContextKey{}).(string); ok {
-		model = requested
-	}
-	if !policy.AllowsModel(model) {
-		body, _ := json.Marshal(ErrorResponse{Error: ErrorDetail{
-			Message: fmt.Sprintf("model %s is not allowed for this API key", model),
-			Type:    "permission_error", Code: "model_not_allowed",
-		}})
-		return ctx, &interfaces.ErrorMessage{StatusCode: http.StatusForbidden, Error: errors.New(string(body)), DirectResponse: true, Body: body}
+	if err := checkKeyPolicyRoute(ctx, model, model); err != nil {
+		return ctx, err
 	}
 	return coreauth.WithCredentialFilter(ctx, func(auth *coreauth.Auth) bool {
 		return auth != nil && policy.AllowsCredential(auth.FileName, auth.ID, auth.Label)
 	}), nil
+}
+
+func checkKeyPolicyRoute(ctx context.Context, requested, resolved string) *interfaces.ErrorMessage {
+	policy := access.KeyPolicyFromContext(ctx)
+	if policy == nil {
+		return nil
+	}
+	if clientModel, ok := ctx.Value(clientRequestedModelContextKey{}).(string); ok {
+		requested = clientModel
+	}
+	if !policy.AllowsModelRoute(requested, resolved) {
+		body, _ := json.Marshal(ErrorResponse{Error: ErrorDetail{
+			Message: fmt.Sprintf("model %s is not allowed for this API key", requested),
+			Type:    "permission_error", Code: "model_not_allowed",
+		}})
+		return &interfaces.ErrorMessage{StatusCode: http.StatusForbidden, Error: errors.New(string(body)), DirectResponse: true, Body: body}
+	}
+	return nil
 }
 
 func filterKeyPolicyModelList(c *gin.Context, body []byte) ([]byte, error) {

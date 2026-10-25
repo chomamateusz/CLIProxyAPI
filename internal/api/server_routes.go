@@ -25,6 +25,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	responsesclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/gemini"
@@ -386,6 +387,12 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		log.WithError(errRoute).Warn("codex alpha search: model router returned an unsupported target")
 		c.JSON(clienterror.HTTPStatusFromErrorOr(errRoute, http.StatusServiceUnavailable), gin.H{"error": errRoute.Error()})
 		return
+	}
+	if policy := access.KeyPolicyFromContext(ctx); policy != nil {
+		if selectionModel == "" && (len(policy.Models) != 0 || len(policy.ExcludedModels) != 0) || !policy.AllowsModelRoute(strings.TrimSpace(routing.Model), selectionModel) || !policy.AllowsModel(selectionModel) {
+			c.JSON(http.StatusForbidden, gin.H{"error": gin.H{"type": "permission_error", "code": "model_not_allowed", "message": "model is not allowed for this API key"}})
+			return
+		}
 	}
 	selectionOpts := coreexecutor.Options{Headers: selectionHeaders, OriginalRequest: body}
 	var selection *auth.HomeDispatchSelection

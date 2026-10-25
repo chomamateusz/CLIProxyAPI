@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 func TestCreateClientSecretMapsStandardRealtimeModel(t *testing.T) {
@@ -78,6 +80,46 @@ func TestCreateClientSecretMapsStandardRealtimeModel(t *testing.T) {
 	}
 	if got := modelFromJSON(authorization.Session); got != defaultLiveModel {
 		t.Fatalf("upstream session model = %q, want %q", got, defaultLiveModel)
+	}
+}
+
+func TestRealtimePolicyRejectsModelAndCarriesPolicy(t *testing.T) {
+	handler := &Handler{authManager: auth.NewManager(nil, nil, nil), clientSecrets: newClientSecretStore()}
+	denied := &access.KeyPolicy{Models: []string{"other"}}
+	ctx := access.WithKeyPolicy(context.Background(), denied)
+	if _, _, err := handler.selectOAuth(ctx, defaultLiveModel, coreexecutor.Options{}); err == nil {
+		t.Fatal("live selection accepted denied model")
+	}
+	credentialPolicy := &access.KeyPolicy{ExcludedCredentials: []string{"work"}}
+	if err := liveSessionPolicyError(access.WithKeyPolicy(context.Background(), credentialPolicy), defaultLiveModel, &auth.Auth{ID: "work.json", Provider: "codex"}); err == nil {
+		t.Fatal("retained realtime credential bypassed policy")
+	}
+	router := gin.New()
+	router.POST("/v1/realtime/client_secrets", handler.CreateClientSecret)
+	request := func(policy *access.KeyPolicy) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/v1/realtime/client_secrets", strings.NewReader(`{"session":{"type":"realtime","model":"gpt-realtime"}}`))
+		req = req.WithContext(access.WithKeyPolicy(req.Context(), policy))
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := request(denied); rec.Code != http.StatusForbidden {
+		t.Fatalf("denied mint status = %d", rec.Code)
+	}
+	allowed := &access.KeyPolicy{Models: []string{"gpt-realtime"}, ExcludedCredentials: []string{"work"}}
+	rec := request(allowed)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("allowed mint status = %d", rec.Code)
+	}
+	var response struct {
+		Value string `json:"value"`
+	}
+	if json.Unmarshal(rec.Body.Bytes(), &response) != nil {
+		t.Fatal("invalid response")
+	}
+	authorization, err := handler.clientSecrets.authenticate(response.Value)
+	if err != nil || authorization.Policy != allowed {
+		t.Fatal("minted secret lost policy")
 	}
 }
 

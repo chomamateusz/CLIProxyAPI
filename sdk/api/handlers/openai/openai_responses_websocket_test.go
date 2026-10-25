@@ -7781,6 +7781,7 @@ func TestForwardResponsesWebsocketPingWriteFailureAbortsSession(t *testing.T) {
 
 type revocableWebsocketAccessProvider struct {
 	revoked      atomic.Bool
+	policy       atomic.Pointer[sdkaccess.KeyPolicy]
 	deniedModel  string
 	mu           sync.Mutex
 	seenRequests []*http.Request
@@ -7811,7 +7812,26 @@ func (p *revocableWebsocketAccessProvider) Authenticate(_ context.Context, r *ht
 	if p.deniedModel != "" && strings.TrimSpace(gjson.GetBytes(body, "model").String()) == p.deniedModel {
 		return nil, sdkaccess.NewDeniedError("quota exhausted for model", http.StatusTooManyRequests)
 	}
-	return &sdkaccess.Result{Principal: "key-1", Provider: p.Identifier()}, nil
+	return &sdkaccess.Result{Principal: "key-1", Provider: p.Identifier(), Policy: p.policy.Load()}, nil
+}
+
+func TestResponsesWebsocketTurnRejectsTightenedModelPolicy(t *testing.T) {
+	provider := &revocableWebsocketAccessProvider{}
+	provider.policy.Store(&sdkaccess.KeyPolicy{Models: []string{"allowed"}})
+	manager := sdkaccess.NewManager()
+	manager.SetProviders([]sdkaccess.Provider{provider})
+	h := &OpenAIResponsesAPIHandler{AccessManager: manager}
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	request := httptest.NewRequest("GET", "/v1/responses", nil)
+	request.Header.Set("Authorization", "Bearer key-1")
+	c.Request = request
+	if err := h.authenticateResponsesWebsocketTurn(c, request, []byte(`{"model":"allowed"}`), "allowed", true); err != nil {
+		t.Fatalf("allowed turn: %v", err)
+	}
+	provider.policy.Store(&sdkaccess.KeyPolicy{Models: []string{"other"}})
+	if err := h.authenticateResponsesWebsocketTurn(c, request, []byte(`{"model":"allowed"}`), "allowed", false); err == nil || err.StatusCode != http.StatusForbidden {
+		t.Fatalf("tightened turn policy: %v", err)
+	}
 }
 
 func TestResponsesWebsocketReauthorizesEachTurnAndKeepsSocketOpen(t *testing.T) {

@@ -135,6 +135,32 @@ func TestQuotaSelectorsPick(t *testing.T) {
 			nearestReset: "b", mostUsed: "b",
 		},
 		{
+			name: "exhausted priority falls back",
+			auths: func() []*Auth {
+				blocked := sampled("a", "100", time.Hour)
+				blocked.Attributes = map[string]string{"priority": "10"}
+				return []*Auth{blocked, sampled("b", "20", 2*time.Hour)}
+			},
+			nearestReset: "b", mostUsed: "b",
+		},
+		{
+			name: "elapsed reset is unsampled",
+			auths: func() []*Auth {
+				return []*Auth{sampled("a", "60", 10*time.Minute), sampled("b", "90", -time.Hour)}
+			},
+			nearestReset: "a", mostUsed: "a",
+		},
+		{
+			name: "rfc reset is sampled",
+			auths: func() []*Auth {
+				first := sampled("a", "60", 2*time.Hour)
+				second := sampled("b", "70", 3*time.Hour)
+				second.Quota.Signals["X-Codex-Primary-Reset-At"] = now.Add(time.Hour).Format(time.RFC3339)
+				return []*Auth{first, second}
+			},
+			nearestReset: "b", mostUsed: "b",
+		},
+		{
 			name: "websocket preference", websocket: true,
 			auths: func() []*Auth {
 				preferred := sampled("b", "20", 2*time.Hour)
@@ -203,5 +229,51 @@ func TestQuotaSelectorsPick(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestQuotaSessionAffinityRebindsAtLimitCredential(t *testing.T) {
+	selector := NewSessionAffinitySelector(&NearestResetSelector{})
+	defer selector.Stop()
+	options := cliproxyexecutor.Options{OriginalRequest: []byte(`{"session_id":"quota-bound-session"}`)}
+	now := time.Now().Truncate(time.Second)
+	bound := &Auth{ID: "bound", Provider: "codex"}
+	other := &Auth{ID: "other", Provider: "codex"}
+	first, err := selector.Pick(context.Background(), "codex", "model", options, []*Auth{bound, other})
+	if err != nil || first == nil || first.ID != "bound" {
+		t.Fatalf("initial affinity selection = %v, %v", first, err)
+	}
+	bound.Quota = QuotaState{ObservedAt: now, Signals: map[string]string{"X-Codex-Primary-Used-Percent": "100", "X-Codex-Primary-Reset-At": strconv.FormatInt(now.Add(time.Hour).Unix(), 10)}}
+	selected, err := selector.Pick(context.Background(), "codex", "model", options, []*Auth{bound, other})
+	if err != nil || selected == nil || selected.ID != "other" {
+		t.Fatalf("affinity retained exhausted credential: %v, %v", selected, err)
+	}
+}
+
+func TestQuotaSelectorsKeepPrevalidatedAliasAndModelSample(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	for _, selector := range []Selector{&NearestResetSelector{}, &MostUsedSelector{}} {
+		if !isBuiltInSelector(selector) || selectionArgForSelector(selector, "client-alias") != "client-alias" {
+			t.Fatal("quota selector lost prevalidated alias handling")
+		}
+		candidate := &Auth{ID: "candidate", Provider: "codex", ModelStates: map[string]*ModelState{
+			"client-alias": {Quota: QuotaState{ObservedAt: now, Signals: map[string]string{"X-Codex-Primary-Used-Percent": "100", "X-Codex-Primary-Reset-At": strconv.FormatInt(now.Add(time.Hour).Unix(), 10)}}},
+		}}
+		ctx := selectorContextForAvailableAuths(context.Background(), selector, "client-alias")
+		selected, err := selector.Pick(ctx, "codex", selectionArgForSelector(selector, "client-alias"), cliproxyexecutor.Options{}, []*Auth{candidate})
+		if selected != nil || err == nil {
+			t.Fatalf("model-specific quota was ignored: %v, %v", selected, err)
+		}
+	}
+}
+
+func TestManagerPassesLowerPrioritiesToQuotaSelector(t *testing.T) {
+	now := time.Now()
+	high := &Auth{ID: "high", Provider: "codex", Attributes: map[string]string{"priority": "10"}}
+	low := &Auth{ID: "low", Provider: "codex"}
+	manager := NewManager(nil, &NearestResetSelector{}, nil)
+	priority, candidates, err := manager.availableAuthsForSelector(&NearestResetSelector{}, []*Auth{high, low}, "codex", "model", now, false)
+	if err != nil || len(priority) != 1 || priority[0].ID != "high" || len(candidates) != 2 {
+		t.Fatalf("quota selector candidates: priority=%v all=%v err=%v", priority, candidates, err)
 	}
 }

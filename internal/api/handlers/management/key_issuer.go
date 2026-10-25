@@ -147,6 +147,18 @@ func (h *Handler) IssuedKeys(c *gin.Context) {
 			return
 		}
 	}
+	if created.Key == "" && len(current.APIKeys) == len(removed) && len(current.KeyIssuerKeys) == 0 {
+		var random [32]byte
+		if _, err = rand.Read(random[:]); err != nil {
+			clientKeyPolicyError(c, 500, "generation_failed", "Could not preserve client authentication")
+			return
+		}
+		node = new(yaml.Node)
+		if err = node.Encode(access.KeyPolicy{Key: "sk-fleet-revoked-" + base64.RawURLEncoding.EncodeToString(random[:]), ExpiresAt: time.Unix(0, 0).UTC().Format(time.RFC3339)}); err != nil {
+			clientKeyPolicyError(c, 500, "encode_failed", "Could not preserve client authentication")
+			return
+		}
+	}
 	data, err := issuedKeysYAML(raw, node, removed)
 	if err != nil {
 		clientKeyPolicyError(c, 500, "invalid_config", "Could not preserve configuration around client keys")

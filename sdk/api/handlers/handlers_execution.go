@@ -45,14 +45,19 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 }
 
 func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	ctx, policyErr := applyKeyPolicy(ctx, modelName)
-	if policyErr != nil {
-		return nil, nil, policyErr
-	}
 	originalRequestedModel := modelName
 	// Speech-only models are reachable solely through the speech entry protocol.
 	execOptions.AllowSpeechModel = isModelExecutionSpeechProtocol(entryProtocol)
 	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, false, execOptions)
+	ctx = withClientRequestedModelIfUnset(ctx, modelName)
+	policyModel := modelName
+	if routeDecision.Model != "" {
+		policyModel = routeDecision.Model
+	}
+	ctx, policyErr := applyKeyPolicy(ctx, policyModel)
+	if policyErr != nil {
+		return nil, nil, policyErr
+	}
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
 	if errMsg := validateNativeInteractionsExecution(entryProtocol, execOptions, routeDecision); errMsg != nil {
 		return nil, nil, errMsg
@@ -63,6 +68,9 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
 	if errMsg != nil {
 		return nil, nil, errMsg
+	}
+	if policyErr = checkKeyPolicyRoute(ctx, originalRequestedModel, normalizedModel); policyErr != nil {
+		return nil, nil, policyErr
 	}
 	providers = adjustExecutionProvidersForEntryProtocol(entryProtocol, providers)
 	reqMeta := requestExecutionMetadata(ctx)
@@ -105,6 +113,10 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		lifecycle.completeError(ctx, interceptErr)
 		return nil, nil, interceptErr
 	}
+	if policyErr = checkKeyPolicyRoute(ctx, originalRequestedModel, req.Model); policyErr != nil {
+		lifecycle.completeError(ctx, policyErr)
+		return nil, nil, policyErr
+	}
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
 	if err != nil {
@@ -130,18 +142,26 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 }
 
 func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	ctx, policyErr := applyKeyPolicy(ctx, modelName)
+	originalRequestedModel := modelName
+	routeDecision := h.applyModelRouter(ctx, handlerType, modelName, rawJSON, false, execOptions)
+	ctx = withClientRequestedModelIfUnset(ctx, modelName)
+	policyModel := modelName
+	if routeDecision.Model != "" {
+		policyModel = routeDecision.Model
+	}
+	ctx, policyErr := applyKeyPolicy(ctx, policyModel)
 	if policyErr != nil {
 		return nil, nil, policyErr
 	}
-	originalRequestedModel := modelName
-	routeDecision := h.applyModelRouter(ctx, handlerType, modelName, rawJSON, false, execOptions)
 	if routeDecision.ExecutorPluginID != "" {
 		return h.countWithPluginExecutor(ctx, handlerType, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
 	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision, execOptions)
 	if errMsg != nil {
 		return nil, nil, errMsg
+	}
+	if policyErr = checkKeyPolicyRoute(ctx, originalRequestedModel, normalizedModel); policyErr != nil {
+		return nil, nil, policyErr
 	}
 	providers = adjustExecutionProvidersForEntryProtocol(handlerType, providers)
 	reqMeta := requestExecutionMetadata(ctx)
@@ -178,6 +198,10 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	if interceptErr != nil {
 		lifecycle.completeError(ctx, interceptErr)
 		return nil, nil, interceptErr
+	}
+	if policyErr = checkKeyPolicyRoute(ctx, originalRequestedModel, req.Model); policyErr != nil {
+		lifecycle.completeError(ctx, policyErr)
+		return nil, nil, policyErr
 	}
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)

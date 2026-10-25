@@ -130,6 +130,60 @@ func TestIssueRevokeClientKeys(t *testing.T) {
 	apply()
 }
 
+func TestRevokeFinalIssuedKeyKeepsAuthenticationRequired(t *testing.T) {
+	h, _, path := newClientKeyPoliciesTestHandler(t, "config-version: 8\naccess:\n  api-keys: []\n")
+	h.envSecret = "management-fixture"
+	router := gin.New()
+	group := router.Group("/v8/management", h.Middleware())
+	group.POST("/issued-keys", h.IssuedKeys)
+	group.DELETE("/issued-keys/:name", h.IssuedKeys)
+	snapshots := make(chan *config.Config, 2)
+	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) { snapshots <- cfg })
+	request := func(method, path, body string, want int) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(method, "/v8/management"+path, strings.NewReader(body))
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("Authorization", "Bearer management-fixture")
+		router.ServeHTTP(rec, req)
+		if rec.Code != want {
+			t.Fatalf("status = %d, want %d", rec.Code, want)
+		}
+		return rec
+	}
+	created := request("POST", "/issued-keys", `{"name":"only"}`, 201)
+	var issued struct {
+		Key string `json:"key"`
+	}
+	if json.Unmarshal(created.Body.Bytes(), &issued) != nil || issued.Key == "" {
+		t.Fatal("missing issued key")
+	}
+	manager := access.NewManager()
+	defer configaccess.Register(nil)
+	for _, action := range []func(){func() { request("DELETE", "/issued-keys/only", "", 200) }, func() {}} {
+		select {
+		case next := <-snapshots:
+			if _, err := accessconfig.ApplyAccessProviders(manager, nil, next); err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("reload callback missing")
+		}
+		action()
+	}
+	if len(manager.Providers()) == 0 {
+		t.Fatal("final revocation removed authentication provider")
+	}
+	req := httptest.NewRequest("GET", "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+issued.Key)
+	if _, err := manager.Authenticate(context.Background(), req); err == nil {
+		t.Fatal("revoked credential authenticated")
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil || strings.Contains(string(saved), issued.Key) {
+		t.Fatal("revoked key remained in configuration")
+	}
+}
+
 func TestIssuedKeysYAMLPreservation(t *testing.T) {
 	for _, tc := range []struct{ name, raw string }{
 		{"block", "config-version: 8\naccess:\n  api-keys:\n    - 'plain-fixture' # client\nserver: {port: 8317} # server\n"},

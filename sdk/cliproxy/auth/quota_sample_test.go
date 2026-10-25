@@ -1,10 +1,45 @@
 package auth
 
 import (
+	"net/http"
 	"strconv"
 	"testing"
 	"time"
 )
+
+func TestQuotaSampleClaudeWindowClassification(t *testing.T) {
+	now := time.Unix(1787279282, 0)
+	for _, tc := range []struct {
+		name    string
+		signals map[string]string
+		limit   bool
+		reset   time.Time
+	}{
+		{"overage only", map[string]string{"Anthropic-Ratelimit-Unified-Status": "rejected", "Anthropic-Ratelimit-Unified-Overage-Status": "rejected", "Anthropic-Ratelimit-Unified-5h-Status": "allowed", "Anthropic-Ratelimit-Unified-7d-Status": "allowed"}, false, now.Add(time.Hour)},
+		{"seven day", map[string]string{"Anthropic-Ratelimit-Unified-7d-Status": "rejected", "Anthropic-Ratelimit-Unified-7d-Reset": strconv.FormatInt(now.Add(24*time.Hour).Unix(), 10)}, true, now.Add(24 * time.Hour)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			signals := map[string]string{"Anthropic-Ratelimit-Unified-5h-Utilization": "0.3", "Anthropic-Ratelimit-Unified-5h-Reset": strconv.FormatInt(now.Add(time.Hour).Unix(), 10)}
+			for key, value := range tc.signals {
+				signals[key] = value
+			}
+			sample, ok := quotaSampleFor(&Auth{Provider: "claude", Quota: QuotaState{ObservedAt: now, Signals: signals}}, "", now)
+			if !ok || sample.atLimit != tc.limit || !sample.resetAt.Equal(tc.reset) {
+				t.Fatalf("sample = %+v, ok = %v", sample, ok)
+			}
+		})
+	}
+}
+
+func TestQuotaSignalResetFormats(t *testing.T) {
+	want := time.Unix(1787279282, 500000000)
+	for _, raw := range []string{strconv.FormatFloat(float64(want.Unix())+0.5, 'f', 1, 64), want.Format(time.RFC3339Nano), want.UTC().Truncate(time.Second).Format(http.TimeFormat)} {
+		got, ok := quotaSignalReset(raw)
+		if !ok || !got.Equal(want) && !got.Equal(want.Truncate(time.Second)) {
+			t.Fatalf("quotaSignalReset(%q) = %v, %v", raw, got, ok)
+		}
+	}
+}
 
 func TestQuotaSampleFor(t *testing.T) {
 	t.Parallel()
@@ -72,17 +107,14 @@ func TestQuotaSampleFor(t *testing.T) {
 		{
 			name: "codex reset window", provider: "codex", age: 2 * time.Minute,
 			signals: map[string]string{"X-Codex-Primary-Used-Percent": "100", "X-Codex-Primary-Reset-After-Seconds": "60"},
-			ok:      true,
 		},
 		{
 			name: "claude reset window", provider: "claude", age: 2 * time.Minute,
 			signals: map[string]string{"Anthropic-Ratelimit-Unified-5h-Status": "rejected", "Anthropic-Ratelimit-Unified-5h-Reset": strconv.FormatInt(now.Add(-time.Minute).Unix(), 10)},
-			ok:      true,
 		},
 		{
 			name: "reset exactly now", provider: "codex",
 			signals: map[string]string{"X-Codex-Primary-Used-Percent": "100", "X-Codex-Primary-Reset-After-Seconds": "0"},
-			ok:      true,
 		},
 		{
 			name: "old unknown window", provider: "codex", age: 24*time.Hour + time.Second,

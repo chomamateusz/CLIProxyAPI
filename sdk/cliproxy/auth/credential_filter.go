@@ -1,6 +1,10 @@
 package auth
 
-import "context"
+import (
+	"context"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+)
 
 type credentialFilterContextKey struct{}
 
@@ -23,8 +27,19 @@ func credentialFilterFromContext(ctx context.Context) func(*Auth) bool {
 	return filter
 }
 
+func credentialFilterForRequest(ctx context.Context) func(*Auth) bool {
+	previous := credentialFilterFromContext(ctx)
+	policy := access.KeyPolicyFromContext(ctx)
+	if policy == nil {
+		return previous
+	}
+	return func(auth *Auth) bool {
+		return auth != nil && (previous == nil || previous(auth)) && policy.AllowsCredential(auth.FileName, auth.ID, auth.Label)
+	}
+}
+
 func filterCredentialCandidates(ctx context.Context, auths []*Auth) []*Auth {
-	filter := credentialFilterFromContext(ctx)
+	filter := credentialFilterForRequest(ctx)
 	if filter == nil {
 		return auths
 	}
@@ -35,4 +50,18 @@ func filterCredentialCandidates(ctx context.Context, auths []*Auth) []*Auth {
 		}
 	}
 	return filtered
+}
+
+func filterPolicyExecutionModels(ctx context.Context, requested string, models []string) []string {
+	policy := access.KeyPolicyFromContext(ctx)
+	if policy == nil {
+		return models
+	}
+	allowed := make([]string, 0, len(models))
+	for _, model := range models {
+		if policy.AllowsModelRoute(requested, model) {
+			allowed = append(allowed, model)
+		}
+	}
+	return allowed
 }

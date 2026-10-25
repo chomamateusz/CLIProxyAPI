@@ -9,6 +9,7 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -49,6 +50,11 @@ func TestFindAllAntigravityCreditsCandidateAuths_PrefersKnownCreditsThenUnknown(
 	}
 	if candidates[1].auth.ID != "aa-unknown" {
 		t.Fatalf("candidates[1].auth.ID = %q, want %q", candidates[1].auth.ID, "aa-unknown")
+	}
+	policyContext := access.WithKeyPolicy(context.Background(), &access.KeyPolicy{Credentials: []string{"aa-unknown"}})
+	filtered, errFiltered := m.findAllAntigravityCreditsCandidateAuths(policyContext, "claude-sonnet-4-6", opts)
+	if errFiltered != nil || len(filtered) != 1 || filtered[0].auth.ID != "aa-unknown" {
+		t.Fatalf("policy filtered credits candidates = %v, %v", filtered, errFiltered)
 	}
 
 	nonClaude, errNonClaude := m.findAllAntigravityCreditsCandidateAuths(context.Background(), "gemini-3-flash", opts)

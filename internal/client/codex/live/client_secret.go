@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 )
 
 const (
@@ -40,6 +41,7 @@ type ClientSecretAuthorization struct {
 	IssuerPrincipal string
 	IssuerProvider  string
 	Session         json.RawMessage
+	Policy          *access.KeyPolicy
 }
 
 type clientSecretEntry struct {
@@ -74,7 +76,7 @@ func newClientSecretStore() *clientSecretStore {
 	}
 }
 
-func (s *clientSecretStore) create(session json.RawMessage, lifetime time.Duration, issuerPrincipal, issuerProvider string) (string, ClientSecretAuthorization, time.Time, error) {
+func (s *clientSecretStore) create(session json.RawMessage, lifetime time.Duration, issuerPrincipal, issuerProvider string, policies ...*access.KeyPolicy) (string, ClientSecretAuthorization, time.Time, error) {
 	if s == nil {
 		return "", ClientSecretAuthorization{}, time.Time{}, errors.New("Realtime client secret store unavailable")
 	}
@@ -91,6 +93,9 @@ func (s *clientSecretStore) create(session json.RawMessage, lifetime time.Durati
 		IssuerPrincipal: strings.TrimSpace(issuerPrincipal),
 		IssuerProvider:  strings.TrimSpace(issuerProvider),
 		Session:         append(json.RawMessage(nil), session...),
+	}
+	if len(policies) > 0 {
+		authorization.Policy = policies[0]
 	}
 	now := s.currentTime()
 	expiresAt := now.Add(lifetime)
@@ -266,11 +271,15 @@ func (h *Handler) createClientSecret(c *gin.Context, session json.RawMessage, ex
 		writeRealtimeError(c, http.StatusBadRequest, errSession.Error(), "invalid_request_error", "invalid_session")
 		return
 	}
+	if policy := access.KeyPolicyFromContext(c.Request.Context()); policy != nil && !policy.AllowsModelRoute(modelFromJSON(clientSession), modelFromJSON(upstreamSession)) {
+		writeRealtimeError(c, http.StatusForbidden, "model is not allowed for this API key", "permission_error", "model_not_allowed")
+		return
+	}
 	issuerPrincipal, _ := c.Get("userApiKey")
 	issuerProvider, _ := c.Get("accessProvider")
 	issuerPrincipalValue, _ := issuerPrincipal.(string)
 	issuerProviderValue, _ := issuerProvider.(string)
-	token, authorization, expiresAt, errCreate := h.clientSecrets.create(upstreamSession, lifetime, issuerPrincipalValue, issuerProviderValue)
+	token, authorization, expiresAt, errCreate := h.clientSecrets.create(upstreamSession, lifetime, issuerPrincipalValue, issuerProviderValue, access.KeyPolicyFromContext(c.Request.Context()))
 	if errCreate != nil {
 		if errors.Is(errCreate, errClientSecretCapacity) {
 			c.Header("Retry-After", "1")

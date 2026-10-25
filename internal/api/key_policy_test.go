@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	configaccess "github.com/router-for-me/CLIProxyAPI/v8/internal/access/config_access"
+	codexlive "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/live"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -17,6 +19,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 type keyPolicyAccessProvider struct{ policy *access.KeyPolicy }
@@ -149,4 +153,75 @@ func TestKeyPolicyExecutionEndpoints(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCodexAlphaSearchRejectsDeniedModel(t *testing.T) {
+	base := handlers.NewBaseAPIHandlers(&config.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+	server := &Server{handlers: base}
+	manager := access.NewManager()
+	manager.SetProviders([]access.Provider{keyPolicyAccessProvider{policy: &access.KeyPolicy{Models: []string{"allowed"}}}})
+	router := gin.New()
+	router.Use(accessAuthMiddleware(manager, false))
+	for _, path := range []string{"/v1/alpha/search", "/backend-api/codex/alpha/search"} {
+		router.POST(path, server.codexAlphaSearch)
+	}
+	for _, path := range []string{"/v1/alpha/search", "/backend-api/codex/alpha/search"} {
+		for _, body := range []string{`{"model":"denied","query":"test"}`, `{"query":"test"}`} {
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, httptest.NewRequest("POST", path, strings.NewReader(body)))
+			if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "model_not_allowed") {
+				t.Fatalf("%s: status = %d", path, recorder.Code)
+			}
+		}
+	}
+	base.SetModelRouterHost(&codexSearchModelRouter{response: pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetProvider, Target: "codex", TargetModel: "denied"}, handled: true})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest("POST", "/v1/alpha/search", strings.NewReader(`{"model":"allowed","query":"test"}`)))
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("routed target status = %d", recorder.Code)
+	}
+}
+
+func TestRealtimeClientSecretRechecksIssuerPolicy(t *testing.T) {
+	configaccess.Register(&config.SDKConfig{APIKeys: []string{"client-fixture"}, APIKeyPolicies: []access.KeyPolicy{{Key: "client-fixture", Models: []string{"gpt-realtime"}}}})
+	t.Cleanup(func() { configaccess.Register(nil) })
+	manager := access.NewManager()
+	manager.SetProviders(access.RegisteredProviders())
+	liveHandler := codexlive.NewHandler(coreauth.NewManager(nil, nil, nil), nil)
+	router := gin.New()
+	router.POST("/mint", accessAuthMiddleware(manager, true), liveHandler.CreateClientSecret)
+	router.GET("/check", realtimeAuthMiddleware(manager, liveHandler), func(c *gin.Context) {
+		policy := access.KeyPolicyFromContext(c.Request.Context())
+		if policy == nil || !policy.AllowsModel("gpt-realtime") || policy.AllowsModel("other") {
+			c.Status(http.StatusInternalServerError)
+			return
+		}
+		c.Status(http.StatusOK)
+	})
+	req := httptest.NewRequest("POST", "/mint", strings.NewReader(`{"session":{"type":"realtime","model":"gpt-realtime"}}`))
+	req.Header.Set("Authorization", "Bearer client-fixture")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("mint status = %d", rec.Code)
+	}
+	var minted struct {
+		Value string `json:"value"`
+	}
+	if json.Unmarshal(rec.Body.Bytes(), &minted) != nil {
+		t.Fatal("invalid mint response")
+	}
+	check := func(want int) {
+		req := httptest.NewRequest("GET", "/check", nil)
+		req.Header.Set("Authorization", "Bearer "+minted.Value)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != want {
+			t.Fatalf("secret status = %d, want %d", rec.Code, want)
+		}
+	}
+	check(http.StatusOK)
+	configaccess.Register(nil)
+	manager.SetProviders(nil)
+	check(http.StatusUnauthorized)
 }
