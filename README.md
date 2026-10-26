@@ -223,6 +223,8 @@ Both read the rate-limit headers the proxy already records per credential (`x-co
 
 `access.key-issuer-keys` entries (same shape as `api-keys`) may only list, create and revoke client keys; every other management endpoint answers `403`.
 
+Issuer keys are read at startup only: the config watcher does not reload `access.key-issuer-keys`, so adding, rotating or removing one needs a service restart (`systemctl --user restart cliproxyapi`). Client keys created through the issuer take effect without a restart.
+
 ```yaml
 access:
   key-issuer-keys:

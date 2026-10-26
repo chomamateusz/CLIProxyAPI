@@ -5,7 +5,7 @@ HOST="${1:?usage: deploy.sh <ssh-host> <path-to-linux-binary> [key-for-models-ch
 BINARY="${2:?usage: deploy.sh <ssh-host> <path-to-linux-binary> [key-for-models-check]}"
 CLIENT_KEY="${3:-}"
 VERSION="$(basename "$(dirname "$BINARY")")"
-REMOTE_ROOT='$HOME/cliproxyapi'
+REMOTE_ROOT='cliproxyapi'
 
 ssh "$HOST" "mkdir -p $REMOTE_ROOT/$VERSION"
 scp "$BINARY" "$HOST:$REMOTE_ROOT/$VERSION/cli-proxy-api.new"
