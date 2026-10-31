@@ -1099,16 +1099,8 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
 func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	auths = filterCredentialCandidates(ctx, auths)
-	switch s.fallback.(type) {
-	case *NearestResetSelector, *MostUsedSelector:
-		available := make([]*Auth, 0, len(auths))
-		now := time.Now()
-		for _, candidate := range auths {
-			if sample, ok := quotaSampleFor(candidate, model, now); !ok || !sample.atLimit {
-				available = append(available, candidate)
-			}
-		}
-		auths = available
+	if isQuotaSelector(s.fallback) {
+		auths = preferQuotaCapacity(auths, model, time.Now())
 	}
 	entry := selectorLogEntry(ctx)
 	if opts.Metadata == nil {

@@ -20,6 +20,20 @@ func (s *MostUsedSelector) Pick(ctx context.Context, provider, model string, opt
 	return pickQuotaAuth(ctx, provider, model, auths, true)
 }
 
+func isQuotaSelector(selector Selector) bool {
+	if affinity, ok := selector.(*SessionAffinitySelector); ok && affinity != nil {
+		selector = affinity.fallback
+	}
+	switch selector.(type) {
+	case *NearestResetSelector, *MostUsedSelector:
+		return true
+	default:
+		return false
+	}
+}
+
+// Plan headers can read 100 % while the provider still serves the account from
+// credits, so a reading only orders credentials and never excludes one.
 func pickQuotaAuth(ctx context.Context, provider, model string, auths []*Auth, mostUsed bool) (*Auth, error) {
 	now := time.Now()
 	available, err := getSelectorAvailableAuthsAcrossPriorities(ctx, auths, provider, model, now)
@@ -28,17 +42,9 @@ func pickQuotaAuth(ctx context.Context, provider, model string, auths []*Auth, m
 	}
 	samples := make(map[*Auth]quotaSample, len(available))
 	eligible := make(map[*Auth]bool, len(available))
-	var earliest time.Time
 	for _, auth := range available {
-		sample, ok := quotaSampleFor(auth, model, now)
-		if ok && sample.atLimit {
-			if earliest.IsZero() || sample.resetAt.Before(earliest) {
-				earliest = sample.resetAt
-			}
-			continue
-		}
 		eligible[auth] = true
-		if ok {
+		if sample, ok := quotaSampleFor(auth, model, now); ok {
 			samples[auth] = sample
 		}
 	}
@@ -49,8 +55,9 @@ func pickQuotaAuth(ctx context.Context, provider, model string, auths []*Auth, m
 		}
 	}
 	if len(ordered) == 0 {
-		return nil, newAuthUnavailableError(earliest, now)
+		return nil, newAuthUnavailableError(time.Time{}, now)
 	}
+	ordered = preferQuotaCapacity(ordered, model, now)
 	ordered = highestPriorityAuths(ordered)
 	ordered = preferCodexWebsocketAuths(ctx, provider, ordered)
 	sort.SliceStable(ordered, func(i, j int) bool {
@@ -62,7 +69,7 @@ func pickQuotaAuth(ctx context.Context, provider, model string, auths []*Auth, m
 		if !leftSampled {
 			return false
 		}
-		if mostUsed && left.utilisation != right.utilisation {
+		if mostUsed && !left.atLimit && left.utilisation != right.utilisation {
 			return left.utilisation > right.utilisation
 		}
 		if !left.resetAt.Equal(right.resetAt) {
@@ -71,4 +78,17 @@ func pickQuotaAuth(ctx context.Context, provider, model string, auths []*Auth, m
 		return left.utilisation > right.utilisation
 	})
 	return ordered[0], nil
+}
+
+func preferQuotaCapacity(auths []*Auth, model string, now time.Time) []*Auth {
+	withCapacity := make([]*Auth, 0, len(auths))
+	for _, candidate := range auths {
+		if sample, ok := quotaSampleFor(candidate, model, now); !ok || !sample.atLimit {
+			withCapacity = append(withCapacity, candidate)
+		}
+	}
+	if len(withCapacity) == 0 {
+		return auths
+	}
+	return withCapacity
 }

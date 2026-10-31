@@ -179,9 +179,38 @@ func TestQuotaSelectorsPick(t *testing.T) {
 			nearestReset: "b", mostUsed: "b",
 		},
 		{
-			name:      "all at limit",
-			auths:     func() []*Auth { return []*Auth{sampled("a", "100", time.Hour)} },
-			errorCode: "auth_unavailable",
+			name:         "single at limit is selected",
+			auths:        func() []*Auth { return []*Auth{sampled("a", "100", time.Hour)} },
+			nearestReset: "a", mostUsed: "a",
+		},
+		{
+			name: "all at limit soonest reset first",
+			auths: func() []*Auth {
+				return []*Auth{sampled("a", "100", 2*time.Hour), sampled("b", "100", time.Hour), sampled("c", "100", 3*time.Hour)}
+			},
+			nearestReset: "b", mostUsed: "b",
+		},
+		{
+			name: "at limit after unsampled",
+			auths: func() []*Auth {
+				return []*Auth{sampled("a", "100", time.Hour), {ID: "b", Provider: "codex"}}
+			},
+			nearestReset: "b", mostUsed: "b",
+		},
+		{
+			name: "claude rejected only",
+			auths: func() []*Auth {
+				return []*Auth{{ID: "a", Provider: "claude", Quota: QuotaState{ObservedAt: now, Signals: map[string]string{
+					"Anthropic-Ratelimit-Unified-5h-Utilization": "0.9",
+					"Anthropic-Ratelimit-Unified-5h-Status":      "rejected",
+					"Anthropic-Ratelimit-Unified-5h-Reset":       strconv.FormatInt(now.Add(time.Hour).Unix(), 10),
+				}}}, {ID: "b", Provider: "claude", Quota: QuotaState{ObservedAt: now, Signals: map[string]string{
+					"Anthropic-Ratelimit-Unified-5h-Utilization": "1",
+					"Anthropic-Ratelimit-Unified-5h-Status":      "rejected",
+					"Anthropic-Ratelimit-Unified-5h-Reset":       strconv.FormatInt(now.Add(2*time.Hour).Unix(), 10),
+				}}}}
+			},
+			nearestReset: "a", mostUsed: "a",
 		},
 		{
 			name:      "empty",
@@ -283,6 +312,11 @@ func TestQuotaSessionAffinityRebindsAtLimitCredential(t *testing.T) {
 	if err != nil || selected == nil || selected.ID != "other" {
 		t.Fatalf("affinity retained exhausted credential: %v, %v", selected, err)
 	}
+	other.Quota = bound.Quota.Clone()
+	selected, err = selector.Pick(context.Background(), "codex", "model", options, []*Auth{bound, other})
+	if err != nil || selected == nil {
+		t.Fatalf("affinity excluded credentials that only read at limit: %v, %v", selected, err)
+	}
 }
 
 func TestQuotaSelectorsKeepPrevalidatedAliasAndModelSample(t *testing.T) {
@@ -294,9 +328,10 @@ func TestQuotaSelectorsKeepPrevalidatedAliasAndModelSample(t *testing.T) {
 		candidate := &Auth{ID: "candidate", Provider: "codex", ModelStates: map[string]*ModelState{
 			"client-alias": {Quota: QuotaState{ObservedAt: now, Signals: map[string]string{"X-Codex-Primary-Used-Percent": "100", "X-Codex-Primary-Reset-At": strconv.FormatInt(now.Add(time.Hour).Unix(), 10)}}},
 		}}
+		other := &Auth{ID: "other", Provider: "codex"}
 		ctx := selectorContextForAvailableAuths(context.Background(), selector, "client-alias")
-		selected, err := selector.Pick(ctx, "codex", selectionArgForSelector(selector, "client-alias"), cliproxyexecutor.Options{}, []*Auth{candidate})
-		if selected != nil || err == nil {
+		selected, err := selector.Pick(ctx, "codex", selectionArgForSelector(selector, "client-alias"), cliproxyexecutor.Options{}, []*Auth{candidate, other})
+		if err != nil || selected == nil || selected.ID != "other" {
 			t.Fatalf("model-specific quota was ignored: %v, %v", selected, err)
 		}
 	}
