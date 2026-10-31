@@ -2294,7 +2294,11 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
 
 	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
-		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
+		auth, executor, provider, errPick := m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
+		if errPick != nil {
+			return m.pickRefusedCredential(ctx, providers, model, opts, tried, errPick)
+		}
+		return auth, executor, provider, nil
 	}
 
 	eligibleProviders := make([]string, 0, len(providers))

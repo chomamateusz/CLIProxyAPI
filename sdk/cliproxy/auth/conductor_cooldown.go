@@ -889,6 +889,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 	}
+	m.observeProviderResult(ctx, result)
 	modelKey := canonicalModelKey(result.Model)
 
 	var authSnapshot *Auth

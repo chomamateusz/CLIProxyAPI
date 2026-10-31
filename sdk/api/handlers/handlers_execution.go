@@ -411,6 +411,14 @@ func executionErrorMessage(err error) *interfaces.ErrorMessage {
 			}
 			headers = http.Header{"Content-Type": []string{contentType}}
 		}
+		if carrier, ok := direct.(interface{ ResponseHeaders() http.Header }); ok {
+			if headers == nil {
+				headers = make(http.Header)
+			}
+			for key, values := range carrier.ResponseHeaders() {
+				headers[key] = values
+			}
+		}
 		return &interfaces.ErrorMessage{
 			StatusCode:     status,
 			Error:          err,

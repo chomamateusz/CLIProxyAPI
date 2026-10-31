@@ -199,6 +199,7 @@ type Manager struct {
 	homeSessionSelections map[string]map[homeSessionSelectionKey]*HomeDispatchSelection
 	homeSessionLocks      sync.Map
 	homeSessionAliases    homeSessionAliasCache
+	refusals              providerRefusals
 	// providerOffsets tracks per-model provider rotation state for multi-provider routing.
 	providerOffsets             map[string]int
 	homeDispatchBundle          atomic.Pointer[HomeDispatchBundle]
