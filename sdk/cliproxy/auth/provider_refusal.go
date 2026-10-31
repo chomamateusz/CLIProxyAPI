@@ -36,49 +36,92 @@ func (r *providerRefusal) matches(model, routeModel string) bool {
 	return r.credentialScope || r.model == model || routeModel != "" && r.routeModel == routeModel
 }
 
+type authRefusals struct {
+	byModel map[string]*providerRefusal
+	probes  map[string]time.Time
+}
+
 type providerRefusals struct {
 	mu     sync.Mutex
-	byAuth map[string]map[string]*providerRefusal
+	byAuth map[string]*authRefusals
+}
+
+func (s *providerRefusals) entryLocked(authID string) *authRefusals {
+	if s.byAuth == nil {
+		s.byAuth = make(map[string]*authRefusals)
+	}
+	entry := s.byAuth[authID]
+	if entry == nil {
+		entry = &authRefusals{byModel: make(map[string]*providerRefusal), probes: make(map[string]time.Time)}
+		s.byAuth[authID] = entry
+	}
+	return entry
 }
 
 func (s *providerRefusals) record(authID string, refusal *providerRefusal) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.byAuth == nil {
-		s.byAuth = make(map[string]map[string]*providerRefusal)
+	entry := s.entryLocked(authID)
+	entry.byModel[refusal.model] = refusal
+	if refusal.credentialScope {
+		clear(entry.probes)
+	} else {
+		delete(entry.probes, refusal.model)
 	}
-	models := s.byAuth[authID]
-	if models == nil {
-		models = make(map[string]*providerRefusal)
-		s.byAuth[authID] = models
-	}
-	models[refusal.model] = refusal
 }
 
 func (s *providerRefusals) forget(authID, model string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	models := s.byAuth[authID]
-	for key, refusal := range models {
-		if key == model || refusal.credentialScope {
-			delete(models, key)
+	entry := s.byAuth[authID]
+	if entry == nil {
+		return
+	}
+	delete(entry.probes, model)
+	for key, refusal := range entry.byModel {
+		if refusal.credentialScope {
+			delete(entry.byModel, key)
+			clear(entry.probes)
+		} else if key == model {
+			delete(entry.byModel, key)
 		}
 	}
-	if len(models) == 0 {
+	if len(entry.byModel) == 0 && len(entry.probes) == 0 {
 		delete(s.byAuth, authID)
 	}
+}
+
+func (s *providerRefusals) drop(authID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.byAuth, authID)
 }
 
 func (s *providerRefusals) latest(authID, model, routeModel string) *providerRefusal {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var newest *providerRefusal
-	for _, refusal := range s.byAuth[authID] {
-		if refusal.matches(model, routeModel) && (newest == nil || refusal.at.After(newest.at)) {
-			newest = refusal
+	if entry := s.byAuth[authID]; entry != nil {
+		for _, refusal := range entry.byModel {
+			if refusal.matches(model, routeModel) && (newest == nil || refusal.at.After(newest.at)) {
+				newest = refusal
+			}
 		}
 	}
 	return newest
+}
+
+// Without a claim every request arriving during the probe's round trip would
+// hit the exhausted credential as well.
+func (s *providerRefusals) claimProbe(authID, model string, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry := s.entryLocked(authID)
+	if claimed, ok := entry.probes[model]; ok && now.Sub(claimed) < refusedCredentialRetryGuard {
+		return false
+	}
+	entry.probes[model] = now
+	return true
 }
 
 func providerRefusalModelKey(result Result) string {
@@ -228,6 +271,24 @@ func providerRefusalPassThrough(ctx context.Context, err error) error {
 	return newProviderRefusalError(ctx, last, err)
 }
 
+type refusedCandidate struct {
+	authID  string
+	model   string
+	next    time.Time
+	started time.Time
+	refusal *providerRefusal
+}
+
+// Only a credential whose last answer was a refusal is probed single-flight:
+// after a success there is no refusal to hand to concurrent requests, and the
+// credential has just shown that it serves.
+func (m *Manager) mayProbe(candidate *refusedCandidate, now time.Time) bool {
+	if now.Sub(candidate.started) < refusedCredentialRetryGuard {
+		return false
+	}
+	return candidate.refusal == nil || m.refusals.claimProbe(candidate.authID, candidate.model, now)
+}
+
 func (m *Manager) pickRefusedCredential(ctx context.Context, providers []string, routeModel string, opts cliproxyexecutor.Options, tried map[string]struct{}, pickErr error) (*Auth, ProviderExecutor, string, error) {
 	if m == nil || !isAuthUnavailableError(pickErr) || !isQuotaSelector(m.Selector()) {
 		return nil, nil, "", pickErr
@@ -238,18 +299,18 @@ func (m *Manager) pickRefusedCredential(ctx context.Context, providers []string,
 		}
 	}
 	now := time.Now()
-	soonestID, soonestModel, newest := m.refusedCooldownCandidates(ctx, providers, routeModel, opts, tried, now)
-	if soonestID == "" {
+	soonest, newest := m.refusedCooldownCandidates(ctx, providers, routeModel, opts, tried, now)
+	if soonest == nil {
 		return nil, nil, "", pickErr
 	}
-	if started := m.refusals.latest(soonestID, soonestModel, canonicalModelKey(routeModel)); started != nil && now.Sub(started.at) < refusedCredentialRetryGuard {
-		if newest == nil || newest.at.Before(started.at) {
-			newest = started
+	if !m.mayProbe(soonest, now) {
+		if newest == nil {
+			return nil, nil, "", pickErr
 		}
 		return nil, nil, "", newProviderRefusalError(ctx, newest, nil)
 	}
 	m.mu.Lock()
-	current := m.auths[soonestID]
+	current := m.auths[soonest.authID]
 	if current == nil {
 		m.mu.Unlock()
 		return nil, nil, "", pickErr
@@ -267,7 +328,7 @@ func (m *Manager) pickRefusedCredential(ctx context.Context, providers []string,
 	return selected, executor, providerKey, nil
 }
 
-func (m *Manager) refusedCooldownCandidates(ctx context.Context, providers []string, routeModel string, opts cliproxyexecutor.Options, tried map[string]struct{}, now time.Time) (soonestID, soonestModel string, newest *providerRefusal) {
+func (m *Manager) refusedCooldownCandidates(ctx context.Context, providers []string, routeModel string, opts cliproxyexecutor.Options, tried map[string]struct{}, now time.Time) (soonest *refusedCandidate, newest *providerRefusal) {
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	providerSet := make(map[string]struct{}, len(providers))
@@ -276,7 +337,6 @@ func (m *Manager) refusedCooldownCandidates(ctx context.Context, providers []str
 	}
 	routeKey := canonicalModelKey(routeModel)
 	registryRef := registry.GetGlobalRegistry()
-	var soonestNext time.Time
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, candidate := range m.auths {
@@ -302,20 +362,68 @@ func (m *Manager) refusedCooldownCandidates(ctx context.Context, providers []str
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
 		blocked, reason, next := isAuthBlockedForModel(candidate, checkModel, now)
 		if !blocked {
-			return "", "", nil
+			return nil, nil
 		}
 		if reason != blockReasonCooldown || !next.After(now) {
 			continue
 		}
+		started, refused := refusalCooldownStart(candidate, checkModel, now)
+		if !refused {
+			continue
+		}
 		modelKey := canonicalModelKey(checkModel)
-		if refusal := m.refusals.latest(candidate.ID, modelKey, routeKey); refusal != nil && (newest == nil || refusal.at.After(newest.at)) {
+		refusal := m.refusals.latest(candidate.ID, modelKey, routeKey)
+		if refusal != nil && (newest == nil || refusal.at.After(newest.at)) {
 			newest = refusal
 		}
-		if soonestID == "" || next.Before(soonestNext) || next.Equal(soonestNext) && candidate.ID < soonestID {
-			soonestID, soonestModel, soonestNext = candidate.ID, modelKey, next
+		if soonest == nil || next.Before(soonest.next) || next.Equal(soonest.next) && candidate.ID < soonest.authID {
+			soonest = &refusedCandidate{authID: candidate.ID, model: modelKey, next: next, started: started, refusal: refusal}
 		}
 	}
-	return soonestID, soonestModel, newest
+	return soonest, newest
+}
+
+func isRefusalQuota(quota QuotaState, nextRetryAfter, now time.Time) bool {
+	return quota.Exceeded && (quota.Reason == "quota" || quota.Reason == "credential_quota") &&
+		quota.NextRecoverAt.After(now) && !nextRetryAfter.After(quota.NextRecoverAt)
+}
+
+// The start comes from the persisted cooldown state rather than the in-memory
+// refusals so the guard also holds for cooldowns restored after a restart.
+func refusalCooldownStart(auth *Auth, model string, now time.Time) (time.Time, bool) {
+	credentialWide := auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)
+	modelKey := canonicalModelKey(model)
+	var started time.Time
+	matched, refusalState := false, false
+	for stateModel, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		forModel := modelKey != "" && canonicalModelKey(stateModel) == modelKey
+		matched = matched || forModel
+		refusal := isRefusalQuota(state.Quota, state.NextRetryAfter, now)
+		if forModel && !refusal {
+			if blocked, _, _ := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now); blocked {
+				return time.Time{}, false
+			}
+		}
+		if refusal && (forModel || credentialWide) {
+			refusalState = true
+			if state.UpdatedAt.After(started) {
+				started = state.UpdatedAt
+			}
+		}
+	}
+	switch {
+	case refusalState:
+		return started, true
+	case credentialWide:
+		return auth.UpdatedAt, true
+	case matched:
+		return time.Time{}, false
+	default:
+		return auth.UpdatedAt, isRefusalQuota(auth.Quota, auth.NextRetryAfter, now)
+	}
 }
 
 func releaseCooldownForAttempt(auth *Auth) {

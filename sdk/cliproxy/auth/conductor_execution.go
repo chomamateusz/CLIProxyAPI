@@ -129,7 +129,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	}
 	if m.HomeEnabled() {
 		resp, errHome := m.executeHome(ctx, normalized, req, opts, false)
-		return resp, unwrapExecutionBoundaryError(errHome)
+		return resp, providerRefusalPassThrough(ctx, unwrapExecutionBoundaryError(errHome))
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
@@ -190,7 +190,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	}
 	if m.HomeEnabled() {
 		resp, errHome := m.executeHome(ctx, normalized, req, opts, true)
-		return resp, unwrapExecutionBoundaryError(errHome)
+		return resp, providerRefusalPassThrough(ctx, unwrapExecutionBoundaryError(errHome))
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
