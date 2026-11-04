@@ -344,7 +344,7 @@ func TestClaudeHeadersIndicateUnifiedRateLimitRejection_OverageRejection_Utiliza
 	}{
 		{name: "healthy zero utilization", utilization: "0.00", wantUnified: false},
 		{name: "healthy partial utilization", utilization: "0.50", wantUnified: false},
-		{name: "missing utilization", utilization: "", wantUnified: true},
+		{name: "no five hour window", utilization: "", wantUnified: false},
 		{name: "invalid text", utilization: "invalid", wantUnified: true},
 		{name: "NaN", utilization: "NaN", wantUnified: true},
 		{name: "+Inf", utilization: "+Inf", wantUnified: true},
@@ -416,6 +416,7 @@ func TestUnifiedResetMatchingOverageResetDoesNotOverrideRetryAfter_Issue6465(t *
 	headers := http.Header{
 		"Anthropic-Ratelimit-Unified-Status":               []string{"rejected"},
 		"Anthropic-Ratelimit-Unified-Representative-Claim": []string{"overage"},
+		"Anthropic-Ratelimit-Unified-5h-Reset":             []string{strconv.FormatInt(now.Add(time.Hour).Unix(), 10)},
 		"Anthropic-Ratelimit-Unified-7d-Status":            []string{"allowed"},
 		"Anthropic-Ratelimit-Unified-7d-Utilization":       []string{"0.69"},
 		"Anthropic-Ratelimit-Unified-Reset":                []string{billingReset},
@@ -425,7 +426,7 @@ func TestUnifiedResetMatchingOverageResetDoesNotOverrideRetryAfter_Issue6465(t *
 	}
 
 	if !ClaudeHeadersIndicateUnifiedRateLimitRejection(headers) {
-		t.Fatal("missing 5h utilization should stay a credential-wide rejection")
+		t.Fatal("reset-only 5h window should stay a credential-wide rejection")
 	}
 	got := parseClaudeRateLimitResetWithFuzz(headers, now, 0, 0)
 	if got == nil {

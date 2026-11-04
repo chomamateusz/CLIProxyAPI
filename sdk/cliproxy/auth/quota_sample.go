@@ -95,6 +95,12 @@ func quotaClaudeSharedAtLimit(signals map[string]string) bool {
 		utilisation, ok := quotaSignalNumber(signals[name])
 		return ok && utilisation < 1
 	}
+	_, has5hStatus := signals["Anthropic-Ratelimit-Unified-5h-Status"]
+	_, has5hUtilisation := signals["Anthropic-Ratelimit-Unified-5h-Utilization"]
+	_, has5hReset := signals["Anthropic-Ratelimit-Unified-5h-Reset"]
+	if !has5hStatus && !has5hUtilisation && !has5hReset && allowed(shared7d) {
+		return false
+	}
 	if (allowed(shared5h) || shared5h == "" && healthy("Anthropic-Ratelimit-Unified-5h-Utilization")) && (allowed(shared7d) || shared7d == "" && healthy("Anthropic-Ratelimit-Unified-7d-Utilization")) {
 		return false
 	}
