@@ -86,6 +86,10 @@ func policyMatches(patterns, names []string) bool {
 	return false
 }
 
+func WildcardMatch(pattern, value string) bool {
+	return wildcardMatch(pattern, value)
+}
+
 func wildcardMatch(pattern, value string) bool {
 	pattern, value = strings.ToLower(pattern), strings.ToLower(value)
 	p, v, star, retry := 0, 0, -1, 0
