@@ -71,7 +71,8 @@ func isOverageOrFableOnlyRejection(headers http.Header, unifiedStatus, status5h,
 	shared5hAllowed := isClaudeWindowAllowed(status5h)
 	shared7dAllowed := isClaudeWindowAllowed(status7d)
 
-	if shared5hAllowed && shared7dAllowed {
+	isFableWeeklyClaim := status7dOI == "rejected" || representativeClaim == "seven_day_overage_included"
+	if shared7dAllowed && (shared5hAllowed || isFableWeeklyClaim && !claudeHasFiveHourHeaders(headers)) {
 		return true
 	}
 
@@ -104,6 +105,16 @@ func isOverageOrFableOnlyRejection(headers http.Header, unifiedStatus, status5h,
 		}
 	}
 
+	return false
+}
+
+func claudeHasFiveHourHeaders(headers http.Header) bool {
+	for name := range headers {
+		switch strings.ToLower(name) {
+		case "anthropic-ratelimit-unified-5h-status", "anthropic-ratelimit-unified-5h-utilization", "anthropic-ratelimit-unified-5h-reset":
+			return true
+		}
+	}
 	return false
 }
 

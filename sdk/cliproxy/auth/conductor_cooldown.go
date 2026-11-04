@@ -893,6 +893,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	modelKey := canonicalModelKey(result.Model)
 
 	var authSnapshot *Auth
+	var autoDisablePersistErr error
+	autoDisabled := false
 	cooldownStateChanged := false
 	scheduleUnauthorizedRefresh := false
 	now := time.Now()
@@ -958,7 +960,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			isAuthActiveCooldown(auth, now) && auth.cooldownRecordedSeq > 0 && result.ExecutionSeq <= auth.cooldownRecordedSeq
 
 		if result.Success {
-			if wasTerminalUnauthorized {
+			if wasTerminalUnauthorized || auth.Disabled {
 				if modelKey != "" {
 					state := ensureModelState(auth, modelKey)
 					modelState = state
@@ -981,7 +983,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			} else {
 				clearAuthStateOnSuccess(auth, now)
 			}
-		} else {
+		} else if !auth.Disabled && isOAuthOrganizationRefusal(auth, result.Error) {
+			disableOAuthOrganizationAuth(auth, now)
+			auth.LastError = cloneError(result.Error)
+			autoDisabled = true
+		} else if !auth.Disabled {
 			if modelKey != "" {
 				if !shouldSkipCredentialCooldown(result.Error) {
 					disableCooling := m.cooldownDisabledForAuth(auth)
@@ -1306,6 +1312,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
+		rejectsToken = rejectsToken && !auth.Disabled
 		if rejectsToken {
 			tokenToReject := result.AccessToken
 			if tokenToReject == "" {
@@ -1313,7 +1320,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 			_ = recordRejectedTokenOnAuth(auth, tokenToReject)
 		}
-		if wasTerminalUnauthorized {
+		if wasTerminalUnauthorized && !auth.Disabled {
 			auth.Unavailable = true
 			auth.Status = StatusError
 			auth.NextRefreshAfter = time.Time{}
@@ -1339,7 +1346,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
-		_ = m.persistLocked(ctx, auth)
+		persistCtx := ctx
+		if autoDisabled {
+			persistCtx = WithoutSkipPersist(context.WithoutCancel(ctx))
+		}
+		if errPersist := m.persistLocked(persistCtx, auth); autoDisabled {
+			autoDisablePersistErr = errPersist
+		}
 		authSnapshot = auth.Clone()
 		if trackCooldownState {
 			cooldownRecordsAfter := m.cooldownStateRecordsForAuthLocked(auth, now)
@@ -1349,7 +1362,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.Unlock()
 	releaseMutation()
 	if m.scheduler != nil && authSnapshot != nil {
-		credentialScopedResult := result.CredentialScope || scheduleUnauthorizedRefresh
+		credentialScopedResult := result.CredentialScope || scheduleUnauthorizedRefresh || autoDisabled
 		var targetModels []string
 		if !credentialScopedResult && modelKey != "" {
 			targetModels = append(targetModels, modelKey)
@@ -1385,6 +1398,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		reg.ApplyClientModelProjections(result.AuthID, regEpoch, authSnapshot.Generation, projections)
 	}
 
+	if autoDisabled && authSnapshot != nil {
+		m.publishCredentialAutoDisabled(context.WithoutCancel(ctx), authSnapshot, statusCodeFromResult(result.Error), autoDisablePersistErr)
+	}
 	m.hook.OnResult(ctx, result)
 	m.publishErrorEvent(result, authSnapshot)
 	m.updateSessionAffinity(result)
