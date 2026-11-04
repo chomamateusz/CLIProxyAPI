@@ -6,6 +6,8 @@ package config
 
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
+	FleetAlerts FleetAlertsConfig `yaml:"fleet-alerts" json:"fleet-alerts"`
+
 	// Models selects optional catalog sources independently for each catalog.
 	Models ModelCatalogs `yaml:"models" json:"models"`
 

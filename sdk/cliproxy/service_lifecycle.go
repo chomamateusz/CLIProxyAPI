@@ -82,6 +82,13 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.applyRetryConfig(cfg)
 	s.configureCooldownStateStore(cfg)
+	if s.coreManager != nil && cfg != nil {
+		stopAlerts, errAlerts := s.coreManager.StartFleetAlerts(ctx, cfg.FleetAlerts)
+		if errAlerts != nil {
+			return errAlerts
+		}
+		defer stopAlerts()
+	}
 
 	s.registerPluginAuthParser()
 	if s.coreManager != nil && !homeEnabled {

@@ -9,6 +9,11 @@
 # The compatibility notes at the end show old spellings for existing deployments.
 config-version: 8
 
+fleet-alerts:
+  webhook-url: ""
+  stuck-after: 1h
+  check-interval: 1m
+
 # Optional model catalog sources: http(s) URLs or absolute local file paths.
 # Each explicit source overrides --local-model; otherwise --local-model uses
 # embedded catalogs, and normal mode uses the official remote sources.

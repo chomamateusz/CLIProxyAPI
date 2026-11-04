@@ -17,6 +17,8 @@ type CredentialHealthEvent struct {
 	AuthID           string
 	AuthIndex        string
 	Provider         string
+	Account          string
+	AuthFile         string
 	StatusMessage    string
 	HTTPStatus       int
 	PersistenceError error
@@ -67,6 +69,8 @@ func (m *Manager) publishCredentialAutoDisabled(ctx context.Context, auth *Auth,
 			AuthID:           auth.ID,
 			AuthIndex:        auth.Index,
 			Provider:         auth.Provider,
+			Account:          fleetAlertAccount(auth),
+			AuthFile:         fleetAlertAuthFile(auth),
 			StatusMessage:    auth.StatusMessage,
 			HTTPStatus:       status,
 			PersistenceError: persistErr,

@@ -245,6 +245,47 @@ curl -X DELETE -H "X-Management-Key: $ISSUER" http://host:8317/v8/management/iss
 
 Issued keys are stored in `access.api-keys` with `issued-by`, `created-at` and optional `expires-at`; expired keys stop authenticating.
 
+### Credential health phone alerts
+
+Home Assistant can turn the fork's credential-health webhook into a phone notification. Add this top-level block to `config.yaml` (also present in `config.example.yaml`):
+
+```yaml
+fleet-alerts:
+  webhook-url: "" # e.g. http://<home-assistant-lan-ip>:8123/api/webhook/<id>
+  stuck-after: 1h
+  check-interval: 1m
+```
+
+An empty `webhook-url` disables the feature completely: no worker, hook or HTTP requests. With a URL configured, omitted durations default to `1h` and `1m`; explicit durations must be positive. These settings are read **at startup only**; restart the proxy after changing them. The worker and its auto-disable hook share a service lifetime rather than being replaced by the configuration watcher.
+
+The worker checks every provider. Credential-wide cooldowns (including `credential_quota`), terminal authorization failures and credential-level error states count as unhealthy. A cooldown's expiry makes it healthy again unless a separate credential-level error remains. Model-only restrictions, even an aggregated error from `claude-fable-*`, do not count. Credentials manually disabled through the management API do not alert.
+
+Events are sent once per observed transition:
+
+- `credential_disabled`: immediately when the fork auto-disables a credential after an organization OAuth refusal; delivery runs in the background, never on the request path.
+- `credential_unhealthy`: after continuously observing credential-level unavailability for `stuck-after`, including credentials already reported as auto-disabled.
+- `credential_recovered`: once a previously reported credential is available again (re-enabling an auto-disabled credential also permits recovery).
+
+Every event is an HTTP `POST` to `webhook-url` with `Content-Type: application/json` and exactly these fields:
+
+```json
+{
+  "event": "credential_unhealthy",
+  "provider": "claude",
+  "account": "user@example.com",
+  "auth_file": "claude-xxxx-user@example.com.json",
+  "reason": "credential_quota",
+  "status_message": "Credential quota is exhausted",
+  "since": "2026-11-04T10:00:00Z",
+  "retry_at": "2026-11-04T14:00:00Z",
+  "proxy_version": "dev"
+}
+```
+
+`event` is `credential_unhealthy`, `credential_disabled` or `credential_recovered`. `provider` is the provider identifier, `account` is the credential email or label (falling back to its auth filename), and `auth_file` is only the basename. `reason` is a short machine code such as `credential_quota`, `oauth_refused`, `payment_required`, `unauthorized` or `recovered`. `status_message` is a safe, fixed human-readable summary, never a raw upstream error, and is at most 300 characters. `since` is the RFC3339 start of the observed unhealthy episode; recovery retains that timestamp. `retry_at` is RFC3339 or an empty string. `proxy_version` is the binary's build version. Tokens, keys, cookies and raw auth content are never included.
+
+Requests have a 10-second timeout and do not follow redirects. Non-2xx responses and transport failures log a warning without exposing the webhook URL or response body, then retry on the next check tick. Pending transitions remain ordered per credential, and a successful event is not repeated while its state holds. Delivery is at-least-once after ambiguous network failures, so the receiver should tolerate duplicates. Observation, deduplication and pending deliveries are in memory and reset on restart; an auto-disabled credential loaded from disk without the runtime auto-disable event cannot be distinguished from manual disablement and is not reported. Configure alerts before the auto-disable happens. The Home Assistant receiver and phone-notification automation are configured separately.
+
 ### Deploy
 
 `scripts/fleet/deploy.sh <host> <linux-binary> [client-key]` copies the binary into `~/cliproxyapi/<version>/`, switches the `~/cliproxyapi/cli-proxy-api` symlink, restarts the `cliproxyapi` user unit and checks `/v1/models` with and without a key. `scripts/fleet/rollback.sh <host> [version]` switches back (default `8.0.39`).
