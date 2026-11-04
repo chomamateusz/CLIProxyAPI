@@ -183,6 +183,9 @@ type Config struct {
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
 
+	// OAuthExcludedModelsUntil is informational only: it labels when an exclusion is expected to end and never adds or lifts one.
+	OAuthExcludedModelsUntil map[string]map[string]string `yaml:"oauth-excluded-models-until,omitempty" json:"oauth-excluded-models-until,omitempty"`
+
 	// OAuthModelAlias defines global model name aliases for OAuth/file-backed auth channels.
 	// These aliases affect both model listing and model routing for supported channels:
 	// vertex, aistudio, antigravity, claude, codex, kimi, xai, meta.
