@@ -218,8 +218,8 @@ func OAuthExclusionUntil(cfg *internalconfig.Config, auths []*Auth, provider, pa
 			if state == nil || !access.WildcardMatch(pattern, canonicalModelKey(model)) {
 				continue
 			}
-			reset, ok := quotaRejectedReset(state.Quota.Signals)
-			if !ok || !reset.After(now) {
+			reset, ok := quotaRejectedReset(state.Quota, now)
+			if !ok {
 				continue
 			}
 			observedAt := state.Quota.ObservedAt
@@ -242,17 +242,52 @@ func OAuthExclusionUntil(cfg *internalconfig.Config, auths []*Auth, provider, pa
 	return time.Time{}, ""
 }
 
-func quotaRejectedReset(signals map[string]string) (time.Time, bool) {
-	rejected := func(name string) bool {
-		return strings.EqualFold(strings.TrimSpace(signals[name]), "rejected")
+func quotaRejectedReset(quota QuotaState, now time.Time) (time.Time, bool) {
+	signals := quota.Signals
+	var latest time.Time
+	consider := func(reset time.Time, ok bool) {
+		if ok && reset.After(now) && reset.After(latest) {
+			latest = reset
+		}
 	}
-	if rejected("Anthropic-Ratelimit-Unified-7d_oi-Status") {
-		return quotaSignalReset(signals["Anthropic-Ratelimit-Unified-7d_oi-Reset"])
+	for _, window := range []struct{ status, reset string }{
+		{"Anthropic-Ratelimit-Unified-7d_oi-Status", "Anthropic-Ratelimit-Unified-7d_oi-Reset"},
+		{"Anthropic-Ratelimit-Unified-7d-Status", "Anthropic-Ratelimit-Unified-7d-Reset"},
+		{"Anthropic-Ratelimit-Unified-5h-Status", "Anthropic-Ratelimit-Unified-5h-Reset"},
+		{"Anthropic-Ratelimit-Unified-Status", "Anthropic-Ratelimit-Unified-Reset"},
+	} {
+		if strings.EqualFold(strings.TrimSpace(signals[window.status]), "rejected") {
+			consider(quotaSignalReset(signals[window.reset]))
+		}
 	}
-	if rejected("Anthropic-Ratelimit-Unified-Status") {
-		return quotaSignalReset(signals["Anthropic-Ratelimit-Unified-Reset"])
+	limitReached := quotaSignalBool(signals["X-Codex-Limit-Reached"])
+	codexResets := make([]time.Time, 0, 2)
+	fullWindow := false
+	for _, prefix := range []string{"X-Codex-Primary-", "X-Codex-Secondary-"} {
+		reset, okReset := quotaSignalReset(signals[prefix+"Reset-At"])
+		if !okReset {
+			if after, okAfter := quotaSignalDuration(signals[prefix+"Reset-After-Seconds"], time.Second); okAfter && !quota.ObservedAt.IsZero() {
+				reset, okReset = quota.ObservedAt.Add(after), true
+			}
+		}
+		if !okReset {
+			continue
+		}
+		if used, okUsed := quotaSignalNumber(signals[prefix+"Used-Percent"]); okUsed && used >= 100 {
+			fullWindow = true
+			consider(reset, true)
+			continue
+		}
+		codexResets = append(codexResets, reset)
 	}
-	return time.Time{}, false
+	// An explicit limit-reached flag without a full window does not say which
+	// window tripped, so every window has to reset before the model is usable.
+	if limitReached != nil && *limitReached && !fullWindow {
+		for _, reset := range codexResets {
+			consider(reset, true)
+		}
+	}
+	return latest, !latest.IsZero()
 }
 
 func FindOAuthModelExclusion(cfg *internalconfig.Config, auths []*Auth, model string, now time.Time) (OAuthModelExclusion, bool) {

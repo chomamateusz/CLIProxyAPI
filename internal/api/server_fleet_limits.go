@@ -55,6 +55,7 @@ type fleetLimitsCredential struct {
 	Credits   *fleetLimitsCredits   `json:"credits,omitempty"`
 	Cooldowns []fleetLimitsCooldown `json:"cooldowns"`
 	usable    bool
+	sampled   bool
 }
 
 type fleetLimitsBar struct {
@@ -101,6 +102,13 @@ var fleetLimitsProcessLabelKey = func() []byte {
 }()
 
 func (s *Server) fleetLimits(c *gin.Context) {
+	// AuthMiddleware lets every request through when no client keys are
+	// configured; this route must still never answer anonymously.
+	principal, _ := c.Get("userApiKey")
+	if key, _ := principal.(string); strings.TrimSpace(key) == "" {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": access.NewNoCredentialsError().Message})
+		return
+	}
 	now := fleetLimitsNow().UTC()
 	cfg := s.getConfig()
 	var policy *access.KeyPolicy
@@ -130,7 +138,7 @@ func (s *Server) fleetLimits(c *gin.Context) {
 		if auth == nil || policy != nil && !policy.AllowsCredential(auth.FileName, auth.ID, auth.Label) {
 			continue
 		}
-		credential := fleetLimitsCredentialFor(auth, labelKey, now)
+		credential := fleetLimitsCredentialFor(auth, policy, labelKey, now)
 		response.Credentials = append(response.Credentials, credential)
 		visibleProviders[credential.Provider] = true
 	}
@@ -193,7 +201,7 @@ func fleetLimitsModels(policy *access.KeyPolicy) []fleetLimitsModel {
 	return models
 }
 
-func fleetLimitsCredentialFor(auth *coreauth.Auth, labelKey []byte, now time.Time) fleetLimitsCredential {
+func fleetLimitsCredentialFor(auth *coreauth.Auth, policy *access.KeyPolicy, labelKey []byte, now time.Time) fleetLimitsCredential {
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	credential := fleetLimitsCredential{
 		Label:     fleetLimitsLabel(labelKey, provider, auth.ID),
@@ -204,6 +212,9 @@ func fleetLimitsCredentialFor(auth *coreauth.Auth, labelKey []byte, now time.Tim
 	}
 	credentialCooldown := false
 	for _, view := range coreauth.CooldownSnapshotForAuth(auth, now) {
+		if view.Scope == "model" && !policy.AllowsModel(view.ModelKey) {
+			continue
+		}
 		cooldown := fleetLimitsCooldown{Scope: view.Scope, Model: optionalString(view.ModelKey), Reason: view.Reason, Until: view.RetryAt.UTC().Format(time.RFC3339)}
 		if view.HTTPStatus > 0 {
 			status := view.HTTPStatus
@@ -224,6 +235,7 @@ func fleetLimitsCredentialFor(auth *coreauth.Auth, labelKey []byte, now time.Tim
 
 	limits := coreauth.QuotaLimitsForAuth(auth)
 	credential.Plan = optionalString(limits.Plan)
+	credential.sampled = len(limits.Bars) > 0
 	for _, bar := range limits.Bars {
 		credential.Bars = append(credential.Bars, fleetLimitsBar{
 			ID:          bar.ID,
@@ -251,7 +263,14 @@ func addFleetLimitsSummary(summary map[string]fleetLimitsProviderSummary, creden
 	}
 	if credential.usable {
 		providerSummary.UsableCredentials++
+		lowerTo := func(id string, percent float64, resetsAt *string) {
+			if current, seen := providerSummary.Bars[id]; !seen || percent < current.Percent {
+				providerSummary.Bars[id] = fleetLimitsSummaryBar{Percent: percent, ResetsAt: resetsAt}
+			}
+		}
+		hasSession := false
 		for _, bar := range credential.Bars {
+			hasSession = hasSession || bar.ID == "session_5h"
 			if bar.Percent == nil {
 				continue
 			}
@@ -259,9 +278,12 @@ func addFleetLimitsSummary(summary map[string]fleetLimitsProviderSummary, creden
 			if bar.ResetPassed {
 				percent = 0
 			}
-			if current, seen := providerSummary.Bars[bar.ID]; !seen || percent < current.Percent {
-				providerSummary.Bars[bar.ID] = fleetLimitsSummaryBar{Percent: percent, ResetsAt: bar.ResetsAt}
-			}
+			lowerTo(bar.ID, percent, bar.ResetsAt)
+		}
+		// A sampled plan without a 5h window (Ultra) has no session cap at all,
+		// unlike a missing weekly sample, which only means "not seen yet".
+		if credential.sampled && !hasSession {
+			lowerTo("session_5h", 0, nil)
 		}
 	}
 	summary[credential.Provider] = providerSummary

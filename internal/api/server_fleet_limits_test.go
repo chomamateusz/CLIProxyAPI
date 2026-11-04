@@ -96,6 +96,15 @@ func fleetAuthFile(dir, provider, email string) string {
 
 func newFleetLimitsServer(t *testing.T, withManagementSecret bool) (*Server, *atomic.Int64, string) {
 	t.Helper()
+	raw := fleetLimitsConfigYAML
+	if withManagementSecret {
+		raw = strings.Replace(raw, "oauth:\n", "management:\n  secret-key: "+fleetMgmtSecret+"\noauth:\n", 1)
+	}
+	return newFleetLimitsServerWithConfig(t, raw)
+}
+
+func newFleetLimitsServerWithConfig(t *testing.T, raw string) (*Server, *atomic.Int64, string) {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	previousNow := fleetLimitsNow
@@ -103,10 +112,6 @@ func newFleetLimitsServer(t *testing.T, withManagementSecret bool) (*Server, *at
 	t.Cleanup(func() { fleetLimitsNow = previousNow })
 
 	dir := t.TempDir()
-	raw := fleetLimitsConfigYAML
-	if withManagementSecret {
-		raw = strings.Replace(raw, "oauth:\n", "management:\n  secret-key: "+fleetMgmtSecret+"\noauth:\n", 1)
-	}
 	path := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
@@ -304,6 +309,129 @@ func TestFleetLimitsAuthentication(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestFleetLimitsRequiresClientIdentity(t *testing.T) {
+	oauthOnly := "config-version: 8\noauth:\n  excluded-models:\n    claude: [claude-fable-*]\n"
+	modelsStatus := func(server *Server) int {
+		request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		recorder := httptest.NewRecorder()
+		server.engine.ServeHTTP(recorder, request)
+		return recorder.Code
+	}
+
+	server, _, _ := newFleetLimitsServerWithConfig(t, oauthOnly)
+	recorder := fleetLimitsRequest(server, "", "")
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("no keys configured: status = %d, want 401", recorder.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil || body["error"] != "Missing API key" {
+		t.Fatalf("no keys configured: body = %s", recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "credentials") {
+		t.Fatal("anonymous answer carries the credential snapshot")
+	}
+	if got := modelsStatus(server); got != http.StatusOK {
+		t.Fatalf("no keys configured: /v1/models status = %d, want 200", got)
+	}
+
+	plainOnly := "config-version: 8\naccess:\n  api-keys:\n    - " + fleetKeyPlain + "\n"
+	server, _, _ = newFleetLimitsServerWithConfig(t, plainOnly)
+	if got := fleetLimitsRequest(server, "Authorization", "Bearer "+fleetKeyPlain).Code; got != http.StatusOK {
+		t.Fatalf("plain key only: status = %d, want 200", got)
+	}
+	if got := fleetLimitsRequest(server, "", "").Code; got != http.StatusUnauthorized {
+		t.Fatalf("plain key only, no key sent: status = %d, want 401", got)
+	}
+}
+
+func TestFleetLimitsHidesCooldownsOfExcludedModels(t *testing.T) {
+	server, _, _ := newFleetLimitsServer(t, true)
+	manager := server.handlers.AuthManager
+	maxAuth, ok := manager.GetByID("claude-max-" + fleetMaxEmail + ".json")
+	if !ok {
+		t.Fatal("max credential not registered")
+	}
+	until := fleetNow.Add(2 * time.Hour)
+	maxAuth.ModelStates = map[string]*coreauth.ModelState{
+		"claude-fable-5-1": {Status: coreauth.StatusError, Unavailable: true, NextRetryAfter: until, Quota: coreauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: until}},
+		"claude-opus-5-5":  {Status: coreauth.StatusError, Unavailable: true, NextRetryAfter: until, Quota: coreauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: until}},
+	}
+	if _, err := manager.Update(context.Background(), maxAuth); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	cooldownModels := func(key string) []string {
+		var models []string
+		for _, raw := range decodeFleetLimits(t, fleetLimitsRequest(server, "Authorization", "Bearer "+key))["credentials"].([]any) {
+			credential := raw.(map[string]any)
+			if barsByID(credential)["session_5h"]["percent"] != 82.0 {
+				continue
+			}
+			for _, cooldown := range credential["cooldowns"].([]any) {
+				models = append(models, cooldown.(map[string]any)["model"].(string))
+			}
+		}
+		sort.Strings(models)
+		return models
+	}
+	if got := strings.Join(cooldownModels(fleetKeyM1), ","); got != "claude-opus-5-5" {
+		t.Fatalf("m1 max cooldowns = %s", got)
+	}
+	if got := strings.Join(cooldownModels(fleetKeyFull), ","); got != "claude-fable-5-1,claude-opus-5-5" {
+		t.Fatalf("full-key max cooldowns = %s", got)
+	}
+
+	ultra, _ := manager.GetByID("claude-" + fleetUltraEmail + ".json")
+	policy := &sdkaccess.KeyPolicy{ExcludedModels: []string{"claude-fable-*"}}
+	credential := fleetLimitsCredentialFor(ultra, policy, fleetLimitsProcessLabelKey, fleetNow)
+	if len(credential.Cooldowns) != 1 || credential.Cooldowns[0].Scope != "credential" || credential.State != "cooldown" {
+		t.Fatalf("ultra cooldowns under m1 policy = %+v (state %s)", credential.Cooldowns, credential.State)
+	}
+}
+
+func TestFleetLimitsSummarySessionWithoutWindow(t *testing.T) {
+	ultra := &coreauth.Auth{ID: "ultra", Provider: "claude", Quota: coreauth.QuotaState{ObservedAt: fleetNow.Add(-time.Hour), Signals: map[string]string{
+		"Anthropic-Ratelimit-Unified-7d-Utilization": "0.4",
+		"Anthropic-Ratelimit-Unified-7d-Status":      "allowed",
+		"Anthropic-Ratelimit-Unified-7d-Reset":       "1794153600",
+	}}}
+	maxPlan := &coreauth.Auth{ID: "max", Provider: "claude", Quota: coreauth.QuotaState{ObservedAt: fleetNow.Add(-time.Hour), Signals: map[string]string{
+		"Anthropic-Ratelimit-Unified-5h-Utilization": "0.9",
+		"Anthropic-Ratelimit-Unified-5h-Status":      "allowed_warning",
+		"Anthropic-Ratelimit-Unified-5h-Reset":       "1794168000",
+		"Anthropic-Ratelimit-Unified-7d-Utilization": "0.6",
+		"Anthropic-Ratelimit-Unified-7d-Reset":       "1794153600",
+	}}}
+	unsampled := &coreauth.Auth{ID: "fresh", Provider: "claude"}
+	summarise := func(auths ...*coreauth.Auth) map[string]fleetLimitsSummaryBar {
+		summary := make(map[string]fleetLimitsProviderSummary)
+		for _, auth := range auths {
+			addFleetLimitsSummary(summary, fleetLimitsCredentialFor(auth, nil, fleetLimitsProcessLabelKey, fleetNow))
+		}
+		return summary["claude"].Bars
+	}
+
+	bars := summarise(ultra, maxPlan)
+	if session, ok := bars["session_5h"]; !ok || session.Percent != 0 || session.ResetsAt != nil {
+		t.Fatalf("ultra + max session_5h = %+v (%v)", session, ok)
+	}
+	if weekly := bars["weekly_all"]; weekly.Percent != 40 {
+		t.Fatalf("ultra + max weekly_all = %+v", weekly)
+	}
+	bars = summarise(maxPlan)
+	if session := bars["session_5h"]; session.Percent != 90 || session.ResetsAt == nil {
+		t.Fatalf("max alone session_5h = %+v", session)
+	}
+	bars = summarise(unsampled)
+	if _, ok := bars["session_5h"]; ok || len(bars) != 0 {
+		t.Fatalf("unsampled credential bars = %+v", bars)
+	}
+	bars = summarise(unsampled, maxPlan)
+	if session := bars["session_5h"]; session.Percent != 90 {
+		t.Fatalf("unsampled + max session_5h = %+v", session)
 	}
 }
 

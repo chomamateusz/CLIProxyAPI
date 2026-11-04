@@ -235,3 +235,52 @@ func TestFindOAuthModelExclusion(t *testing.T) {
 		t.Fatal("unexcluded model matched")
 	}
 }
+
+func TestOAuthExclusionUntilUsesLatestFutureRejectedReset(t *testing.T) {
+	sharedReset := time.Date(2026, 11, 8, 16, 0, 0, 0, time.UTC)
+	signals := ultraFableSignals()
+	signals["Anthropic-Ratelimit-Unified-7d_oi-Reset"] = "2026-11-01T00:00:00Z"
+	signals["Anthropic-Ratelimit-Unified-7d-Status"] = "rejected"
+	signals["Anthropic-Ratelimit-Unified-5h-Status"] = "rejected"
+	signals["Anthropic-Ratelimit-Unified-5h-Reset"] = "2026-11-04T01:00:00Z"
+	auth := &Auth{ID: "claude-ultra", Provider: "claude", ModelStates: map[string]*ModelState{
+		"claude-fable-5-1": {Quota: QuotaState{ObservedAt: quotaLimitsNow.Add(-time.Hour), Signals: signals}},
+	}}
+	until, source := OAuthExclusionUntil(nil, []*Auth{auth}, "claude", "claude-fable-*", quotaLimitsNow)
+	if !until.Equal(sharedReset) || source != ExclusionUntilQuotaReset {
+		t.Fatalf("until = %v (%q), want %v (quota_reset)", until, source, sharedReset)
+	}
+}
+
+func TestOAuthExclusionUntilCodexFullWindow(t *testing.T) {
+	cooldownEnd := time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC)
+	observedAt := quotaLimitsNow.Add(-time.Hour)
+	signals := map[string]string{
+		"X-Codex-Primary-Used-Percent":          "100",
+		"X-Codex-Primary-Window-Minutes":        "10080",
+		"X-Codex-Primary-Reset-After-Seconds":   "234000",
+		"X-Codex-Secondary-Used-Percent":        "35",
+		"X-Codex-Secondary-Window-Minutes":      "300",
+		"X-Codex-Secondary-Reset-After-Seconds": "600",
+	}
+	codex := &Auth{ID: "codex-pro", Provider: "codex", ModelStates: map[string]*ModelState{
+		"gpt-6-sol": {Unavailable: true, NextRetryAfter: cooldownEnd, Quota: QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: cooldownEnd, ObservedAt: observedAt, Signals: signals}},
+	}}
+	want := observedAt.Add(234000 * time.Second)
+	until, source := OAuthExclusionUntil(nil, []*Auth{codex}, "codex", "gpt-6-sol", quotaLimitsNow)
+	if !until.Equal(want) || source != ExclusionUntilQuotaReset {
+		t.Fatalf("until = %v (%q), want %v (quota_reset)", until, source, want)
+	}
+
+	signals["X-Codex-Primary-Used-Percent"] = "99.5"
+	until, source = OAuthExclusionUntil(nil, []*Auth{codex}, "codex", "gpt-6-sol", quotaLimitsNow)
+	if !until.Equal(cooldownEnd) || source != ExclusionUntilCooldown {
+		t.Fatalf("window below 100 %%: until = %v (%q), want cooldown %v", until, source, cooldownEnd)
+	}
+
+	signals["X-Codex-Limit-Reached"] = "true"
+	until, source = OAuthExclusionUntil(nil, []*Auth{codex}, "codex", "gpt-6-sol", quotaLimitsNow)
+	if !until.Equal(want) || source != ExclusionUntilQuotaReset {
+		t.Fatalf("limit reached: until = %v (%q), want %v (quota_reset)", until, source, want)
+	}
+}

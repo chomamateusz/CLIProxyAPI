@@ -288,7 +288,7 @@ Requests have a 10-second timeout and do not follow redirects. Non-2xx responses
 
 ### Own limits
 
-`GET /v1/fleet/limits` lets a client read its own remaining quota with its own client key (the same `Authorization: Bearer` / `x-api-key` forms `/v1/models` accepts). Management and issuer keys are refused with `401`. The answer is built from in-memory state only (credentials, stored quota headers, cooldowns, config); it never calls an upstream.
+`GET /v1/fleet/limits` lets a client read its own remaining quota with its own client key (the same `Authorization: Bearer` / `x-api-key` forms `/v1/models` accepts). Management and issuer keys are refused with `401`, and so is a request without a client key even when no client keys are configured (other routes stay open in that case). The answer is built from in-memory state only (credentials, stored quota headers, cooldowns, config); it never calls an upstream.
 
 ```sh
 curl -H "Authorization: Bearer $CLIENT_KEY" http://host:8317/v1/fleet/limits
@@ -313,14 +313,18 @@ curl -H "Authorization: Bearer $CLIENT_KEY" http://host:8317/v1/fleet/limits
     ],
     "cooldowns": [{"scope": "model", "model": "claude-fable-5-1", "reason": "quota", "until": "2026-11-08T16:00:30Z", "http_status": 429}]
   }],
-  "summary": {"claude": {"usable_credentials": 1, "bars": {"weekly_all": {"percent": 64, "resets_at": "2026-11-08T16:00:00Z"}}}}
+  "summary": {"claude": {"usable_credentials": 1, "bars": {
+    "weekly_all": {"percent": 64, "resets_at": "2026-11-08T16:00:00Z"},
+    "weekly_fable": {"percent": 100, "resets_at": "2026-11-08T16:00:00Z"},
+    "session_5h": {"percent": 0, "resets_at": null}
+  }}}
 }
 ```
 
 - `models` is exactly what `/v1/models` lists for the key; `credentials` only lists credentials the key may use. `label` is the provider plus an opaque id (keyed by the management secret, random per process without one); it never contains an e-mail, account id or file name.
-- `state` is `disabled`, `cooldown` (credential-wide cooldown in force), `error` or `active`. `cooldowns` are the timers still in force, as in management `auth-files`.
+- `state` is `disabled`, `cooldown` (credential-wide cooldown in force), `error` or `active`. `cooldowns` are the timers still in force, as in management `auth-files`, minus model cooldowns of models the key may not use.
 - Claude bars: `weekly_all` (`anthropic-ratelimit-unified-7d-*`), `weekly_fable` (`-7d_oi-*`, only sent with Fable responses), `session_5h` (only when the plan sends `-5h-*`; Ultra does not). Codex bars come from the primary and secondary windows (`10080` minutes is `weekly_all`, `300` is `session_5h`, others `window_<minutes>m`); Codex also gets `plan` and `credits`. Each bar uses the freshest stored response carrying it; `reset_passed` means the window rolled over since that sample.
-- `summary` is per provider over usable credentials (not disabled, no credential-wide cooldown): the lowest `percent` per bar, a rolled-over bar counting as `0`.
+- `summary` is per provider over usable credentials (not disabled, no credential-wide cooldown): the lowest `percent` per bar, a rolled-over bar counting as `0`. For `session_5h` only, a credential with stored quota headers but no 5h window (Ultra) counts as `0`, since its plan has no 5h cap; a credential with no stored headers yet is left out of every bar, so `weekly_all` and `weekly_fable` only come from credentials that sent that window.
 - Stored quota headers live in memory only and are empty after a restart until the next upstream response; cooldowns survive a restart only with `save-cooldown-status: true`.
 
 ### Excluded models
@@ -333,7 +337,7 @@ A model matching `oauth-excluded-models` answers `403` instead of `400 unknown p
 
 `/v1/messages` gets `{"type":"error","error":{"type":"model_excluded","message":"...","until":"..."}}`. `until` is `null` (and the message says "until further notice") when no end is known. A key-policy exclusion still answers `403 model_not_allowed`.
 
-`until` comes from, in order: the optional `oauth-excluded-models-until` config entry (informational only, never adds or lifts an exclusion; hot-reloaded; past times are ignored), a future reset of a rejected quota window stored for a matching model, the latest cooldown of a matching model.
+`until` comes from, in order: the optional `oauth-excluded-models-until` config entry (informational only, never adds or lifts an exclusion; hot-reloaded; past times are ignored), the latest future reset among the rejected quota windows stored for a matching model (Claude `7d_oi`, `7d`, `5h` or unified status `rejected`; Codex primary/secondary windows at `100` percent, or every window when only the limit-reached flag is set), the latest cooldown of a matching model.
 
 ```yaml
 oauth-excluded-models:
