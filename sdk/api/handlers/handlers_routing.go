@@ -209,6 +209,9 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	}
 
 	if len(providers) == 0 {
+		if errMsg := h.modelExcludedErrorMessage(modelName, baseModel); errMsg != nil {
+			return nil, "", errMsg
+		}
 		// The client asked for a model this proxy cannot route. Report it as a request
 		// error so streaming clients receive an actionable message instead of a
 		// gateway failure they would keep retrying. 400 is used rather than 404 to keep

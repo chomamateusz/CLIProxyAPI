@@ -67,7 +67,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	}
 	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
 	if errMsg != nil {
-		return nil, nil, errMsg
+		return nil, nil, modelExcludedForProtocol(entryProtocol, errMsg)
 	}
 	if policyErr = checkKeyPolicyRoute(ctx, originalRequestedModel, normalizedModel); policyErr != nil {
 		return nil, nil, policyErr
@@ -158,7 +158,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	}
 	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision, execOptions)
 	if errMsg != nil {
-		return nil, nil, errMsg
+		return nil, nil, modelExcludedForProtocol(handlerType, errMsg)
 	}
 	if policyErr = checkKeyPolicyRoute(ctx, originalRequestedModel, normalizedModel); policyErr != nil {
 		return nil, nil, policyErr
