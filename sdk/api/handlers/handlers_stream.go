@@ -314,7 +314,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- errMsg
+		errChan <- modelExcludedForProtocol(entryProtocol, errMsg)
 		close(errChan)
 		return nil, nil, errChan
 	}

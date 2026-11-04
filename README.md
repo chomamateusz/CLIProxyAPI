@@ -286,6 +286,67 @@ Every event is an HTTP `POST` to `webhook-url` with `Content-Type: application/j
 
 Requests have a 10-second timeout and do not follow redirects. Non-2xx responses and transport failures log a warning without exposing the webhook URL or response body, then retry on the next check tick. Pending transitions remain ordered per credential, and a successful event is not repeated while its state holds. Delivery is at-least-once after ambiguous network failures, so the receiver should tolerate duplicates. Observation, deduplication and pending deliveries are in memory and reset on restart; an auto-disabled credential loaded from disk without the runtime auto-disable event cannot be distinguished from manual disablement and is not reported. Configure alerts before the auto-disable happens. The Home Assistant receiver and phone-notification automation are configured separately.
 
+### Own limits
+
+`GET /v1/fleet/limits` lets a client read its own remaining quota with its own client key (the same `Authorization: Bearer` / `x-api-key` forms `/v1/models` accepts). Management and issuer keys are refused with `401`, and so is a request without a client key even when no client keys are configured (other routes stay open in that case). The answer is built from in-memory state only (credentials, stored quota headers, cooldowns, config); it never calls an upstream.
+
+```sh
+curl -H "Authorization: Bearer $CLIENT_KEY" http://host:8317/v1/fleet/limits
+```
+
+```json
+{
+  "object": "fleet.limits",
+  "generated_at": "2026-11-03T20:00:00Z",
+  "proxy_version": "8.1.0",
+  "client": {"name": "m1"},
+  "models": [{"id": "claude-opus-5-5", "providers": ["claude"]}],
+  "exclusions": [
+    {"pattern": "claude-fable-*", "provider": "claude", "source": "oauth-excluded-models", "until": "2026-11-08T16:00:00Z", "until_source": "quota_reset"},
+    {"pattern": "claude-fable-*", "provider": null, "source": "key-policy", "until": null, "until_source": null}
+  ],
+  "credentials": [{
+    "label": "claude-6cc0eb0c", "provider": "claude", "plan": null, "state": "active",
+    "bars": [
+      {"id": "weekly_all", "percent": 64, "status": "allowed", "resets_at": "2026-11-08T16:00:00Z", "sampled_at": "2026-11-03T19:00:00Z", "reset_passed": false},
+      {"id": "weekly_fable", "percent": 100, "status": "rejected", "resets_at": "2026-11-08T16:00:00Z", "sampled_at": "2026-11-03T18:00:00Z", "reset_passed": false}
+    ],
+    "cooldowns": [{"scope": "model", "model": "claude-fable-5-1", "reason": "quota", "until": "2026-11-08T16:00:30Z", "http_status": 429}]
+  }],
+  "summary": {"claude": {"usable_credentials": 1, "bars": {
+    "weekly_all": {"percent": 64, "resets_at": "2026-11-08T16:00:00Z"},
+    "weekly_fable": {"percent": 100, "resets_at": "2026-11-08T16:00:00Z"},
+    "session_5h": {"percent": 0, "resets_at": null}
+  }}}
+}
+```
+
+- `models` is exactly what `/v1/models` lists for the key; `credentials` only lists credentials the key may use. `label` is the provider plus an opaque id (keyed by the management secret, random per process without one); it never contains an e-mail, account id or file name.
+- `state` is `disabled`, `cooldown` (credential-wide cooldown in force), `error` or `active`. `cooldowns` are the timers still in force, as in management `auth-files`, minus model cooldowns of models the key may not use.
+- Claude bars: `weekly_all` (`anthropic-ratelimit-unified-7d-*`), `weekly_fable` (`-7d_oi-*`, only sent with Fable responses), `session_5h` (only when the plan sends `-5h-*`; Ultra does not). Codex bars come from the primary and secondary windows (`10080` minutes is `weekly_all`, `300` is `session_5h`, others `window_<minutes>m`); Codex also gets `plan` and `credits`. Each bar uses the freshest stored response carrying it; `reset_passed` means the window rolled over since that sample.
+- `summary` is per provider over usable credentials (not disabled, no credential-wide cooldown): the lowest `percent` per bar, a rolled-over bar counting as `0`. For `session_5h` only, a credential with stored quota headers but no 5h window (Ultra) counts as `0`, since its plan has no 5h cap; a credential with no stored headers yet is left out of every bar, so `weekly_all` and `weekly_fable` only come from credentials that sent that window.
+- Stored quota headers live in memory only and are empty after a restart until the next upstream response; cooldowns survive a restart only with `save-cooldown-status: true`.
+
+### Excluded models
+
+A model matching `oauth-excluded-models` answers `403` instead of `400 unknown provider`, without `Retry-After`:
+
+```json
+{"error":{"type":"model_excluded","code":"model_excluded","param":"model","message":"model claude-fable-5-1 is excluded on this proxy until 2026-11-08T16:00:00Z (oauth-excluded-models, provider claude); pick another model","until":"2026-11-08T16:00:00Z"}}
+```
+
+`/v1/messages` gets `{"type":"error","error":{"type":"model_excluded","message":"...","until":"..."}}`. `until` is `null` (and the message says "until further notice") when no end is known. A key-policy exclusion still answers `403 model_not_allowed`.
+
+`until` comes from, in order: the optional `oauth-excluded-models-until` config entry (informational only, never adds or lifts an exclusion; hot-reloaded; past times are ignored), the latest future reset among the rejected quota windows stored for a matching model (Claude `7d_oi`, `7d`, `5h` or unified status `rejected`; Codex primary/secondary windows at `100` percent, or every window when only the limit-reached flag is set), the latest cooldown of a matching model.
+
+```yaml
+oauth-excluded-models:
+  claude: [claude-fable-5-1, claude-fable-*]
+oauth-excluded-models-until:
+  claude:
+    claude-fable-*: "2026-11-08T16:00:00Z"
+```
+
 ### Deploy
 
 `scripts/fleet/deploy.sh <host> <linux-binary> [client-key]` copies the binary into `~/cliproxyapi/<version>/`, switches the `~/cliproxyapi/cli-proxy-api` symlink, restarts the `cliproxyapi` user unit and checks `/v1/models` with and without a key. `scripts/fleet/rollback.sh <host> [version]` switches back (default `8.0.39`).
