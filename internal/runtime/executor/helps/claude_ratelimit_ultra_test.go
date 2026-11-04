@@ -14,7 +14,11 @@ func TestClaudeRateLimitUltraWindowClassification(t *testing.T) {
 	}{
 		{name: "exact incident headers"},
 		{name: "weekly warning", overlay: map[string]string{"Anthropic-Ratelimit-Unified-7d-Status": "allowed_warning"}},
-		{name: "five hour rejected", overlay: map[string]string{"Anthropic-Ratelimit-Unified-5h-Status": "rejected"}, shared: true},
+		{name: "weekly claim only", overlay: map[string]string{"Anthropic-Ratelimit-Unified-7d_oi-Status": "allowed", "Anthropic-Ratelimit-Unified-Representative-Claim": " Seven_Day_Overage_Included "}},
+		{name: "weekly status only", overlay: map[string]string{"Anthropic-Ratelimit-Unified-7d_oi-Status": " ReJeCtEd ", "Anthropic-Ratelimit-Unified-Representative-Claim": "overage"}},
+		{name: "ordinary overage claim", overlay: map[string]string{"Anthropic-Ratelimit-Unified-7d_oi-Status": "allowed", "Anthropic-Ratelimit-Unified-Representative-Claim": "overage"}, shared: true},
+		{name: "similar overage claim", overlay: map[string]string{"Anthropic-Ratelimit-Unified-7d_oi-Status": "allowed", "Anthropic-Ratelimit-Unified-Representative-Claim": "seven_day_overage_included_extra"}, shared: true},
+		{name: "Max weekly claim with five hour rejected", overlay: map[string]string{"Anthropic-Ratelimit-Unified-5h-Status": "rejected", "Anthropic-Ratelimit-Unified-5h-Utilization": "1.0", "Anthropic-Ratelimit-Unified-5h-Reset": "1794153600"}, shared: true},
 		{name: "five hour exhausted without status", overlay: map[string]string{"Anthropic-Ratelimit-Unified-5h-Utilization": "1.0"}, shared: true},
 		{name: "five hour healthy without status", overlay: map[string]string{"Anthropic-Ratelimit-Unified-5h-Utilization": "0.0"}},
 		{name: "five hour reset only", overlay: map[string]string{"Anthropic-Ratelimit-Unified-5h-Reset": "1794153600"}, shared: true},

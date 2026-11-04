@@ -2,6 +2,7 @@ package auth
 
 import (
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -34,7 +35,11 @@ func TestQuotaClaudeSharedAtLimitUltra(t *testing.T) {
 	}{
 		{name: "exact incident headers"},
 		{name: "weekly warning", overlay: map[string]string{"Anthropic-Ratelimit-Unified-7d-Status": "allowed_warning"}},
-		{name: "five hour rejected", overlay: map[string]string{"Anthropic-Ratelimit-Unified-5h-Status": "rejected"}, shared: true},
+		{name: "weekly claim only", overlay: map[string]string{"Anthropic-Ratelimit-Unified-7d_oi-Status": "allowed", "Anthropic-Ratelimit-Unified-Representative-Claim": " Seven_Day_Overage_Included "}},
+		{name: "weekly status only", overlay: map[string]string{"Anthropic-Ratelimit-Unified-7d_oi-Status": " ReJeCtEd ", "Anthropic-Ratelimit-Unified-Representative-Claim": "overage"}},
+		{name: "ordinary overage claim", overlay: map[string]string{"Anthropic-Ratelimit-Unified-7d_oi-Status": "allowed", "Anthropic-Ratelimit-Unified-Representative-Claim": "overage"}, shared: true},
+		{name: "similar overage claim", overlay: map[string]string{"Anthropic-Ratelimit-Unified-7d_oi-Status": "allowed", "Anthropic-Ratelimit-Unified-Representative-Claim": "seven_day_overage_included_extra"}, shared: true},
+		{name: "Max weekly claim with five hour rejected", overlay: map[string]string{"Anthropic-Ratelimit-Unified-5h-Status": "rejected", "Anthropic-Ratelimit-Unified-5h-Utilization": "1.0", "Anthropic-Ratelimit-Unified-5h-Reset": "1794153600"}, shared: true},
 		{name: "five hour exhausted without status", overlay: map[string]string{"Anthropic-Ratelimit-Unified-5h-Utilization": "1.0"}, shared: true},
 		{name: "five hour healthy without status", overlay: map[string]string{"Anthropic-Ratelimit-Unified-5h-Utilization": "0.0"}},
 		{name: "five hour reset only", overlay: map[string]string{"Anthropic-Ratelimit-Unified-5h-Reset": "1794153600"}, shared: true},
@@ -52,6 +57,24 @@ func TestQuotaClaudeSharedAtLimitUltra(t *testing.T) {
 				t.Fatalf("shared at limit = %v, want %v; signals=%v", got, tc.shared, signals)
 			}
 		})
+	}
+}
+
+func TestQuotaClaudeSharedAtLimitOverageRetryAfter_Issue6465(t *testing.T) {
+	now := time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)
+	billingReset := strconv.FormatInt(now.Add(48*time.Hour).Unix(), 10)
+	headers := http.Header{
+		"Anthropic-Ratelimit-Unified-Status":               {"rejected"},
+		"Anthropic-Ratelimit-Unified-Representative-Claim": {"overage"},
+		"Anthropic-Ratelimit-Unified-7d-Status":            {"allowed"},
+		"Anthropic-Ratelimit-Unified-7d-Utilization":       {"0.69"},
+		"Anthropic-Ratelimit-Unified-Reset":                {billingReset},
+		"Anthropic-Ratelimit-Unified-Overage-Status":       {"rejected"},
+		"Anthropic-Ratelimit-Unified-Overage-Reset":        {billingReset},
+		"Retry-After": {"60"},
+	}
+	if !quotaClaudeSharedAtLimit(collectQuotaSignals("claude", headers)) {
+		t.Fatal("ordinary overage rejection with missing 5h signals should stay credential-wide")
 	}
 }
 

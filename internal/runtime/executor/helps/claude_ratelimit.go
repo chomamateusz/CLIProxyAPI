@@ -71,7 +71,8 @@ func isOverageOrFableOnlyRejection(headers http.Header, unifiedStatus, status5h,
 	shared5hAllowed := isClaudeWindowAllowed(status5h)
 	shared7dAllowed := isClaudeWindowAllowed(status7d)
 
-	if shared7dAllowed && (shared5hAllowed || !claudeHasFiveHourHeaders(headers)) {
+	isFableWeeklyClaim := status7dOI == "rejected" || representativeClaim == "seven_day_overage_included"
+	if shared7dAllowed && (shared5hAllowed || isFableWeeklyClaim && !claudeHasFiveHourHeaders(headers)) {
 		return true
 	}
 

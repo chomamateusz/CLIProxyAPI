@@ -98,7 +98,8 @@ func quotaClaudeSharedAtLimit(signals map[string]string) bool {
 	_, has5hStatus := signals["Anthropic-Ratelimit-Unified-5h-Status"]
 	_, has5hUtilisation := signals["Anthropic-Ratelimit-Unified-5h-Utilization"]
 	_, has5hReset := signals["Anthropic-Ratelimit-Unified-5h-Reset"]
-	if !has5hStatus && !has5hUtilisation && !has5hReset && allowed(shared7d) {
+	isFableWeeklyClaim := status("Anthropic-Ratelimit-Unified-7d_oi-Status") == "rejected" || status("Anthropic-Ratelimit-Unified-Representative-Claim") == "seven_day_overage_included"
+	if isFableWeeklyClaim && !has5hStatus && !has5hUtilisation && !has5hReset && allowed(shared7d) {
 		return false
 	}
 	if (allowed(shared5h) || shared5h == "" && healthy("Anthropic-Ratelimit-Unified-5h-Utilization")) && (allowed(shared7d) || shared7d == "" && healthy("Anthropic-Ratelimit-Unified-7d-Utilization")) {
