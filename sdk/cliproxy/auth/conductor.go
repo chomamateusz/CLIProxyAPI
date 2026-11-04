@@ -176,6 +176,7 @@ type Manager struct {
 	selector                  Selector
 	hook                      Hook
 	resultPolicy              atomic.Pointer[resultPolicyHolder]
+	credentialHealthHook      atomic.Pointer[credentialHealthHookHolder]
 	mu                        sync.RWMutex
 	selectorMu                sync.Mutex
 	configCooldownMu          sync.Mutex
