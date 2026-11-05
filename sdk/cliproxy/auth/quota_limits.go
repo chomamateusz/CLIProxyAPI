@@ -60,7 +60,10 @@ func QuotaLimitsForAuth(auth *Auth) QuotaLimits {
 }
 
 func quotaObservations(auth *Auth) []QuotaState {
-	observations := make([]QuotaState, 0, 1+len(auth.ModelStates))
+	observations := make([]QuotaState, 0, 2+len(auth.ModelStates))
+	if !auth.sampledQuota.ObservedAt.IsZero() && len(auth.sampledQuota.Signals) > 0 {
+		observations = append(observations, auth.sampledQuota)
+	}
 	if !auth.Quota.ObservedAt.IsZero() && len(auth.Quota.Signals) > 0 {
 		observations = append(observations, auth.Quota)
 	}

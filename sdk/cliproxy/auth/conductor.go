@@ -228,6 +228,7 @@ type Manager struct {
 	rtProvider RoundTripperProvider
 
 	// Auto refresh state
+	quotaSampler  *quotaSampler
 	refreshCancel context.CancelFunc
 	refreshLoop   *authAutoRefreshLoop
 	// refreshJobs retains queued and running jobs across loop restarts under m.mu.
@@ -277,6 +278,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	if errInFlightConfig == nil {
 		manager.ApplyHomeInFlightPublisherConfig(defaultInFlightConfig)
 	}
+	manager.quotaSampler = newQuotaSampler(manager)
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
 }

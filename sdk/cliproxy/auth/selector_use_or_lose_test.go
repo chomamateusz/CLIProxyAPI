@@ -114,11 +114,11 @@ func TestUseOrLosePick(t *testing.T) {
 			b.Quota.Signals["Anthropic-Ratelimit-Unified-7d_oi-Status"] = "rejected"
 			return []*Auth{a, b}
 		}, want: "devp.it"},
-		{name: "Fable weekly without utilisation falls back", model: "claude-fable-5-1", prepare: func(a, b *Auth) []*Auth {
+		{name: "Fable rejected weekly without utilisation demotes", model: "claude-fable-5-1", prepare: func(a, b *Auth) []*Auth {
 			delete(b.Quota.Signals, "Anthropic-Ratelimit-Unified-7d_oi-Utilization")
 			b.Quota.Signals["Anthropic-Ratelimit-Unified-7d_oi-Status"] = "rejected"
 			return []*Auth{a, b}
-		}, want: "devp.it"},
+		}, want: "amazingdesign"},
 		{name: "Fable stale observation falls back", model: "claude-fable-5-1", prepare: func(a, b *Auth) []*Auth {
 			fable := useOrLoseTestAuth("stale", now.Add(-7*24*time.Hour), 8*24*time.Hour, .5)
 			useOrLoseTestWindow(fable, "7d_oi", now.Add(24*time.Hour), 1)
@@ -149,8 +149,8 @@ func TestUseOrLosePick(t *testing.T) {
 			b.ModelStates = map[string]*ModelState{"claude-fable-5-1": {Quota: QuotaState{Exceeded: true, NextRecoverAt: now.Add(time.Hour)}}}
 			return []*Auth{b, a}
 		}, want: "amazingdesign"},
-		{name: "unsampled tail", prepare: func(a, b *Auth) []*Auth { b.Quota = QuotaState{}; return []*Auth{b, a} }, want: "amazingdesign"},
-		{name: "expired weekly becomes unsampled", prepare: func(a, b *Auth) []*Auth { useOrLoseTestWindow(b, "7d", now, 1); return []*Auth{b, a} }, want: "amazingdesign"},
+		{name: "unsampled first probe", prepare: func(a, b *Auth) []*Auth { b.Quota = QuotaState{}; return []*Auth{b, a} }, want: "devp.it"},
+		{name: "expired weekly becomes unsampled", prepare: func(a, b *Auth) []*Auth { useOrLoseTestWindow(b, "7d", now, 1); return []*Auth{b, a} }, want: "devp.it"},
 		{name: "all unsampled preserve initial order", prepare: func(a, b *Auth) []*Auth { a.Quota = QuotaState{}; b.Quota = QuotaState{}; return []*Auth{b, a} }, want: "devp.it"},
 		{name: "priority preserved", prepare: func(a, b *Auth) []*Auth { a.Attributes = map[string]string{"priority": "10"}; return []*Auth{a, b} }, want: "amazingdesign"},
 		{name: "cap precedes priority", prepare: func(a, b *Auth) []*Auth {
@@ -201,9 +201,13 @@ func TestUseOrLoseUnsampledProbes(t *testing.T) {
 				known.Quota = QuotaState{}
 			}
 			auths := []*Auth{known, {ID: "unknown-a", Provider: "claude"}, {ID: "unknown-b", Provider: "claude"}}
-			for i, want := range []string{"known", "unknown-a", "unknown-b", "known"} {
+			wants := []string{"unknown-a", "unknown-b", "known", "unknown-a"}
+			if allUnknown {
+				wants = []string{"known", "unknown-a", "unknown-b", "known"}
+			}
+			for i, want := range wants {
 				at := now
-				if i > 0 {
+				if i == 3 {
 					at = at.Add(useOrLoseProbeInterval)
 				}
 				got, err := selector.pick(context.Background(), "claude", "claude-opus-5-5", auths, at)
@@ -224,11 +228,12 @@ func TestUseOrLoseMixedUnsampledProbes(t *testing.T) {
 		at   time.Duration
 		want string
 	}{
+		{0, "unknown-a"},
+		{0, "unknown-b"},
 		{0, "known"},
 		{useOrLoseProbeInterval, "unknown-a"},
-		{2 * useOrLoseProbeInterval, "unknown-b"},
-		{2 * useOrLoseProbeInterval, "unknown-a"},
-		{2 * useOrLoseProbeInterval, "known"},
+		{useOrLoseProbeInterval, "unknown-b"},
+		{useOrLoseProbeInterval, "known"},
 	} {
 		got, err := selector.pick(context.Background(), "mixed", "claude-opus-5-5", auths, now.Add(tc.at))
 		if err != nil || got == nil || got.ID != tc.want {
@@ -261,22 +266,12 @@ func TestUseOrLoseManagerMixedUnsampledProbes(t *testing.T) {
 	}
 	counts := map[string]int{}
 	for i := range 3 {
-		if i > 0 {
-			selector.mu.Lock()
-			for key, entry := range selector.probes {
-				entry.after = entry.after.Add(-useOrLoseProbeInterval)
-				entry.seen = entry.seen.Add(-useOrLoseProbeInterval)
-				entry.attempted = entry.attempted.Add(-useOrLoseProbeInterval)
-				selector.probes[key] = entry
-			}
-			selector.mu.Unlock()
-		}
 		got, _, provider, err := manager.pickNextMixed(context.Background(), []string{"claude"}, model, cliproxyexecutor.Options{}, nil)
 		if err != nil || got == nil || provider != "claude" {
 			t.Fatalf("pickNextMixed = %v, %q, %v", got, provider, err)
 		}
-		if i == 0 && got.ID != "mixed-known" {
-			t.Fatalf("initial selection = %s; want mixed-known", got.ID)
+		if i == 0 && got.ID != "mixed-unknown-a" {
+			t.Fatalf("initial selection = %s; want mixed-unknown-a", got.ID)
 		}
 		counts[got.ID]++
 	}
@@ -297,8 +292,8 @@ func TestUseOrLoseProbeSurvivesIdleAndIsModelScoped(t *testing.T) {
 		at    time.Time
 		want  string
 	}{
-		{"claude-opus-5-5", now, "known"},
-		{"claude-fable-5-1", now.Add(time.Minute), "known"},
+		{"claude-opus-5-5", now, "unknown"},
+		{"claude-fable-5-1", now.Add(time.Minute), "unknown"},
 		{"claude-opus-5-5", now.Add(20 * time.Minute), "unknown"},
 	} {
 		got, err := selector.pick(context.Background(), "claude", tc.model, auths, tc.at)

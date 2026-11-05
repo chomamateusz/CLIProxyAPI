@@ -277,6 +277,7 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
 		s.coreManager.SetSelector(newRoutingSelector(routingState))
 		s.appliedRoutingState = &routingState
+		log.Infof("config reloaded: routing.strategy=%s session-affinity=%t", routingState.strategy, routingState.sessionAffinity)
 	}
 	s.applyRetryConfig(commit.cfg)
 	store := s.resolveCooldownStateStore(commit.cfg)

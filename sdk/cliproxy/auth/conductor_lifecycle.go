@@ -157,6 +157,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	m.structuralEpoch.Add(1)
 	m.queueRefreshReschedule(auth.ID)
+	m.quotaSamplerAuthChanged(auth)
 	m.hook.OnAuthRegistered(ctx, auth.Clone())
 	if cooldownStateChanged {
 		m.persistCooldownStates(context.Background())
@@ -267,6 +268,7 @@ func (m *Manager) finishAuthUpdate(ctx context.Context, committed *Auth, persist
 	}
 	m.structuralEpoch.Add(1)
 	m.queueRefreshReschedule(committed.ID)
+	m.quotaSamplerAuthChanged(committed)
 	m.hook.OnAuthUpdated(ctx, committed.Clone())
 	if persistCooldown {
 		m.persistCooldownStates(context.Background())
@@ -364,6 +366,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	auth.Success = existing.Success
 	auth.Failed = existing.Failed
 	auth.recentRequests = existing.recentRequests
+	auth.lastRequestAt = existing.lastRequestAt
 	if auth.Generation <= existing.Generation {
 		auth.Generation = existing.Generation + 1
 	} else {
@@ -374,6 +377,11 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		existingVersion = 1
 	}
 	credChanged := CredentialsChanged(existing, auth)
+	if credChanged {
+		auth.sampledQuota = QuotaState{}
+	} else {
+		auth.sampledQuota = existing.sampledQuota.Clone()
+	}
 	if credChanged {
 		auth.CredentialVersion = max(auth.CredentialVersion, existingVersion) + 1
 	} else {
@@ -668,6 +676,7 @@ func (m *Manager) Load(ctx context.Context) error {
 	}
 	m.structuralEpoch.Add(1)
 	m.syncScheduler()
+	m.wakeQuotaSampler()
 	return nil
 }
 

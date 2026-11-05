@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -114,20 +115,26 @@ func (s *UseOrLoseSelector) pick(ctx context.Context, provider, model string, au
 			selected, found = auth, true
 		}
 	}
-	return s.probeUnsampled(ctx, model, ordered, samples, selected, now), nil
+	selected = s.probeUnsampled(ctx, model, ordered, samples, selected, now)
+	s.logPick(ctx, selected, useOrLoseSelectionModel(ctx, selected, model), "", now)
+	return selected, nil
 }
 
 func (s *UseOrLoseSelector) sampleFor(auth *Auth, model string, now time.Time) useOrLoseSample {
 	observations := quotaObservations(auth)
 	var weekly, short useOrLoseWindow
-	atLimit := false
+	atLimit := auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now)
 	creditsAvailable := false
 	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
 	case "claude":
 		weekly, _ = useOrLoseClaudeWindow(observations, "7d")
-		atLimit = weekly.atLimit(now)
+		atLimit = atLimit || weekly.atLimit(now)
 		if strings.Contains(strings.ToLower(model), "fable") {
-			if fable, _ := useOrLoseClaudeWindow(observations, "7d_oi"); fable.usable(now) {
+			fable, _ := useOrLoseClaudeWindow(observations, "7d_oi")
+			if fable.observed.Add(7 * 24 * time.Hour).After(now) {
+				atLimit = atLimit || fable.atLimit(now)
+			}
+			if fable.usable(now) {
 				weekly = fable
 			}
 		}
@@ -167,7 +174,7 @@ func (s *UseOrLoseSelector) sampleFor(auth *Auth, model string, now time.Time) u
 	return useOrLoseSample{
 		window:  weekly,
 		sampled: weekly.usable(now),
-		capped:  !creditsAvailable && short.hasUsage && short.utilisation >= capPct/100 && shortActive,
+		capped:  !creditsAvailable && shortActive && (short.hasUsage && short.utilisation >= capPct/100 || short.rejected),
 		atLimit: !creditsAvailable && (atLimit || weekly.atLimit(now)),
 	}
 }
@@ -231,7 +238,12 @@ func (s *UseOrLoseSelector) probeUnsampled(ctx context.Context, model string, au
 		}
 		entry, seen := s.probes[key]
 		if !seen {
-			entry.after = now.Add(useOrLoseProbeInterval)
+			entry.after = now
+			window := samples[auth].window
+			best := samples[selected]
+			if best.sampled && window.reset.After(best.window.reset.Add(time.Hour)) {
+				entry.after = now.Add(useOrLoseProbeInterval)
+			}
 		}
 		entry.seen = now
 		s.probes[key] = entry
@@ -282,4 +294,34 @@ func updateUseOrLoseSelector(current, replacement Selector) bool {
 	old.ShortWindowCapPct = capPct
 	old.mu.Unlock()
 	return true
+}
+
+func (s *UseOrLoseSelector) logPick(ctx context.Context, auth *Auth, model, reason string, now time.Time) {
+	sample := s.sampleFor(auth, model, now)
+	if reason == "" {
+		switch {
+		case sample.atLimit:
+			reason = "at-limit"
+		case sample.capped:
+			reason = "capped"
+		case !sample.sampled:
+			reason = "unsampled-probe"
+		default:
+			reason = "room"
+		}
+	}
+	reset, usage := "unknown", "unknown"
+	if !sample.window.reset.IsZero() {
+		reset = sample.window.reset.UTC().Format(time.RFC3339)
+	}
+	if sample.window.hasUsage {
+		usage = fmt.Sprintf("%.2f", sample.window.utilisation*100)
+	}
+	selectorLogEntry(ctx).Infof("use-or-lose pick: auth=%s binding-reset=%s utilisation=%s reason=%s", auth.ID, reset, usage, reason)
+}
+
+func (s *SessionAffinitySelector) logUseOrLoseAffinity(ctx context.Context, auth *Auth, model string, now time.Time) {
+	if selector, ok := s.fallback.(*UseOrLoseSelector); ok {
+		selector.logPick(ctx, auth, useOrLoseSelectionModel(ctx, auth, model), "affinity-kept", now)
+	}
 }
