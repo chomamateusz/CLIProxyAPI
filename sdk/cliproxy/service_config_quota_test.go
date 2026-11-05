@@ -23,6 +23,8 @@ func TestQuotaRoutingSelectors(t *testing.T) {
 		{"mostused", "most-used", &coreauth.MostUsedSelector{}},
 		{"mu", "most-used", &coreauth.MostUsedSelector{}},
 		{" MU ", "most-used", &coreauth.MostUsedSelector{}},
+		{"use-or-lose", "use-or-lose", &coreauth.UseOrLoseSelector{}},
+		{" USE-OR-LOSE ", "use-or-lose", &coreauth.UseOrLoseSelector{}},
 		{"unknown", "round-robin", &coreauth.RoundRobinSelector{}},
 		{"", "round-robin", &coreauth.RoundRobinSelector{}},
 	} {

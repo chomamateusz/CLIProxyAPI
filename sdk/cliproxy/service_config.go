@@ -80,6 +80,8 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.strategy = "fill-first"
 	case "nearest-reset", "nearestreset", "nr":
 		state.strategy = "nearest-reset"
+	case "use-or-lose":
+		state.strategy = "use-or-lose"
 	case "most-used", "mostused", "mu":
 		state.strategy = "most-used"
 	}
@@ -110,6 +112,8 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 		selector = &coreauth.FillFirstSelector{}
 	case "nearest-reset":
 		selector = &coreauth.NearestResetSelector{}
+	case "use-or-lose":
+		selector = &coreauth.UseOrLoseSelector{}
 	case "most-used":
 		selector = &coreauth.MostUsedSelector{}
 	default:

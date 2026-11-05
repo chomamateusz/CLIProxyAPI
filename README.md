@@ -219,6 +219,25 @@ routing:
 
 Both read the rate-limit headers the proxy already records per credential (`x-codex-primary-*` for Codex, `anthropic-ratelimit-unified-5h-*` for Claude). Providers without such headers fall back to fill-first order.
 
+### Use-or-lose routing
+
+To drain weekly capacity before it expires, select:
+
+```yaml
+routing:
+  strategy: use-or-lose
+  session-affinity: false
+```
+
+The config watcher applies this without a restart. Roll back the routing policy by setting `routing.strategy` to `nearest-reset` (restore the previous session-affinity setting if changed). The other strategies retain their existing behaviour.
+
+- Rank by the all-model weekly reset, or the Fable weekly reset for Fable requests when reported. A Fable weekly window can come from an earlier Fable response even if the newest response is for Opus. Codex uses its primary or secondary seven-day window, not its five-hour reset.
+- A five-hour reading of at least 95% places the credential behind every eligible credential with short-window room. After that reset the cap is ignored. If every eligible credential is capped, one is still tried; quota headers alone never exclude a credential or trigger an extra upstream call.
+- Among resets within one hour of the earliest reset, prefer lower utilisation; equal utilisation prefers the earlier reset, then existing input order. Anchoring the tie group to the earliest reset avoids inconsistent pairwise comparisons across three or more accounts.
+- Disabled credentials, model exclusions, per-key credential policies and backend cooldowns retain their existing eligibility rules. Existing credential priorities and Codex websocket preference apply within the short-cap tier.
+- Missing, invalid or expired weekly samples start behind valid samples. After one minute in the eligible ranking pool, each unsampled credential gets a normal request as a probe, oldest due first, at most once per minute per credential and model family (Fable versus other models). With N due credentials and continuing traffic, all get an attempt within the next N selections. No traffic means no probe; a response without quota headers cannot create a sample. Unsupported providers keep fill-first order.
+- Session affinity, if explicitly enabled, still retains healthy bindings and applies weekly ranking/probes only when invoking the fallback selector. Keep it disabled for per-request weekly ranking and the bounded sampling guarantee. A five-hour cap can rebind an existing session.
+
 ### Key-issuer credentials
 
 `access.key-issuer-keys` entries (same shape as `api-keys`) may only list, create and revoke client keys; every other management endpoint answers `403`.

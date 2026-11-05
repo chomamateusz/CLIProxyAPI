@@ -25,7 +25,7 @@ func isQuotaSelector(selector Selector) bool {
 		selector = affinity.fallback
 	}
 	switch selector.(type) {
-	case *NearestResetSelector, *MostUsedSelector:
+	case *NearestResetSelector, *MostUsedSelector, *UseOrLoseSelector:
 		return true
 	default:
 		return false

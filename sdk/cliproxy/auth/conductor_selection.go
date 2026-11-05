@@ -72,7 +72,7 @@ func (m *Manager) PluginSchedulerWantsAcrossPriorities() bool {
 
 func isBuiltInSelector(selector Selector) bool {
 	switch selector.(type) {
-	case *RoundRobinSelector, *WeightedRoundRobinSelector, *FillFirstSelector, *NearestResetSelector, *MostUsedSelector:
+	case *RoundRobinSelector, *WeightedRoundRobinSelector, *FillFirstSelector, *NearestResetSelector, *MostUsedSelector, *UseOrLoseSelector:
 		return true
 	default:
 		return false
@@ -635,7 +635,7 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 	_, sessionAffinity := selector.(*SessionAffinitySelector)
 	quotaSelector := false
 	switch selector.(type) {
-	case *NearestResetSelector, *MostUsedSelector:
+	case *NearestResetSelector, *MostUsedSelector, *UseOrLoseSelector:
 		quotaSelector = true
 	}
 
@@ -672,7 +672,7 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 
 func selectionArgForSelector(selector Selector, routeModel string) string {
 	switch selector.(type) {
-	case *NearestResetSelector, *MostUsedSelector:
+	case *NearestResetSelector, *MostUsedSelector, *UseOrLoseSelector:
 		return routeModel
 	}
 	if isBuiltInSelector(selector) {

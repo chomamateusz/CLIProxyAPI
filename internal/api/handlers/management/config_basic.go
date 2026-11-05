@@ -323,6 +323,8 @@ func normalizeRoutingStrategy(strategy string) (string, bool) {
 		return "fill-first", true
 	case "nearest-reset", "nearestreset", "nr":
 		return "nearest-reset", true
+	case "use-or-lose":
+		return "use-or-lose", true
 	case "most-used", "mostused", "mu":
 		return "most-used", true
 	default:
