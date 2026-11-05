@@ -58,6 +58,32 @@ func TestUseOrLosePick(t *testing.T) {
 			useOrLoseTestWindow(b, "7d", now.Add(24*time.Hour), 1)
 			b.Quota.Signals["Anthropic-Ratelimit-Unified-7d-Status"] = "rejected"
 			return []*Auth{a, b}
+		}, want: "amazingdesign"},
+		{name: "only eligible credential at weekly limit", prepare: func(a, b *Auth) []*Auth {
+			useOrLoseTestWindow(b, "7d", now.Add(24*time.Hour), 1)
+			b.Quota.Signals["Anthropic-Ratelimit-Unified-7d-Status"] = "rejected"
+			a.Disabled = true
+			return []*Auth{a, b}
+		}, want: "devp.it"},
+		{name: "weekly utilisation alone demotes", prepare: func(a, b *Auth) []*Auth {
+			useOrLoseTestWindow(b, "7d", now.Add(24*time.Hour), 1)
+			return []*Auth{a, b}
+		}, want: "amazingdesign"},
+		{name: "weekly rejected status alone demotes", prepare: func(a, b *Auth) []*Auth {
+			b.Quota.Signals["Anthropic-Ratelimit-Unified-7d-Status"] = " ReJeCtEd "
+			return []*Auth{a, b}
+		}, want: "amazingdesign"},
+		{name: "Fable weekly exhaustion", model: "claude-fable-5-1", prepare: func(a, b *Auth) []*Auth {
+			useOrLoseTestWindow(b, "7d", now.Add(72*time.Hour), .86)
+			b.Quota.Signals["Anthropic-Ratelimit-Unified-7d-Status"] = "allowed_warning"
+			useOrLoseTestWindow(b, "7d_oi", now.Add(24*time.Hour), 1)
+			b.Quota.Signals["Anthropic-Ratelimit-Unified-7d_oi-Status"] = "rejected"
+			return []*Auth{a, b}
+		}, want: "amazingdesign"},
+		{name: "Fable weekly exhaustion does not demote Opus", model: "claude-opus-5-5", prepare: func(a, b *Auth) []*Auth {
+			useOrLoseTestWindow(b, "7d_oi", now.Add(24*time.Hour), 1)
+			b.Quota.Signals["Anthropic-Ratelimit-Unified-7d_oi-Status"] = "rejected"
+			return []*Auth{a, b}
 		}, want: "devp.it"},
 		{name: "lower utilisation in one hour tie", prepare: func(a, b *Auth) []*Auth {
 			useOrLoseTestWindow(a, "7d", now.Add(24*time.Hour), .9)
@@ -79,6 +105,24 @@ func TestUseOrLosePick(t *testing.T) {
 			return []*Auth{a, b}
 		}, want: "amazingdesign"},
 		{name: "Fable weekly fallback", model: "claude-fable-5-1", prepare: func(a, b *Auth) []*Auth {
+			delete(b.Quota.Signals, "Anthropic-Ratelimit-Unified-7d_oi-Reset")
+			delete(b.Quota.Signals, "Anthropic-Ratelimit-Unified-7d_oi-Utilization")
+			return []*Auth{a, b}
+		}, want: "devp.it"},
+		{name: "Fable expired weekly falls back", model: "claude-fable-5-1", prepare: func(a, b *Auth) []*Auth {
+			useOrLoseTestWindow(b, "7d_oi", now, 1)
+			b.Quota.Signals["Anthropic-Ratelimit-Unified-7d_oi-Status"] = "rejected"
+			return []*Auth{a, b}
+		}, want: "devp.it"},
+		{name: "Fable weekly without utilisation falls back", model: "claude-fable-5-1", prepare: func(a, b *Auth) []*Auth {
+			delete(b.Quota.Signals, "Anthropic-Ratelimit-Unified-7d_oi-Utilization")
+			b.Quota.Signals["Anthropic-Ratelimit-Unified-7d_oi-Status"] = "rejected"
+			return []*Auth{a, b}
+		}, want: "devp.it"},
+		{name: "Fable stale observation falls back", model: "claude-fable-5-1", prepare: func(a, b *Auth) []*Auth {
+			fable := useOrLoseTestAuth("stale", now.Add(-7*24*time.Hour), 8*24*time.Hour, .5)
+			useOrLoseTestWindow(fable, "7d_oi", now.Add(24*time.Hour), 1)
+			b.ModelStates = map[string]*ModelState{"claude-fable-5-1": {Quota: fable.Quota}}
 			delete(b.Quota.Signals, "Anthropic-Ratelimit-Unified-7d_oi-Reset")
 			delete(b.Quota.Signals, "Anthropic-Ratelimit-Unified-7d_oi-Utilization")
 			return []*Auth{a, b}
@@ -171,6 +215,78 @@ func TestUseOrLoseUnsampledProbes(t *testing.T) {
 	}
 }
 
+func TestUseOrLoseMixedUnsampledProbes(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	selector := &UseOrLoseSelector{}
+	auths := []*Auth{useOrLoseTestAuth("known", now, 24*time.Hour, .5), {ID: "unknown-a", Provider: " Claude "}, {ID: "unknown-b", Provider: "CODEX"}, {ID: "unsupported", Provider: "gemini"}}
+	for _, tc := range []struct {
+		at   time.Duration
+		want string
+	}{
+		{0, "known"},
+		{useOrLoseProbeInterval, "unknown-a"},
+		{2 * useOrLoseProbeInterval, "unknown-b"},
+		{2 * useOrLoseProbeInterval, "unknown-a"},
+		{2 * useOrLoseProbeInterval, "known"},
+	} {
+		got, err := selector.pick(context.Background(), "mixed", "claude-opus-5-5", auths, now.Add(tc.at))
+		if err != nil || got == nil || got.ID != tc.want {
+			t.Fatalf("at %s: Pick = %v, %v; want %s", tc.at, got, err, tc.want)
+		}
+	}
+	for key := range selector.probes {
+		if key.provider != "claude" && key.provider != "codex" {
+			t.Fatalf("unexpected probe provider: %q", key.provider)
+		}
+	}
+}
+
+func TestUseOrLoseManagerMixedUnsampledProbes(t *testing.T) {
+	now := time.Now()
+	selector := &UseOrLoseSelector{}
+	manager := NewManager(nil, selector, nil)
+	manager.RegisterExecutor(schedulerTestExecutor{provider: "claude"})
+	model := "claude-opus-5-5"
+	auths := []*Auth{useOrLoseTestAuth("mixed-known", now, 24*time.Hour, .5), {ID: "mixed-unknown-a", Provider: "claude"}, {ID: "mixed-unknown-b", Provider: "claude"}}
+	for _, auth := range auths {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatal(err)
+		}
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+	}
+	if manager.useSchedulerFastPath() {
+		t.Fatal("quota selector entered round-robin fast path")
+	}
+	counts := map[string]int{}
+	for i := range 3 {
+		if i > 0 {
+			selector.mu.Lock()
+			for key, entry := range selector.probes {
+				entry.after = entry.after.Add(-useOrLoseProbeInterval)
+				entry.seen = entry.seen.Add(-useOrLoseProbeInterval)
+				entry.attempted = entry.attempted.Add(-useOrLoseProbeInterval)
+				selector.probes[key] = entry
+			}
+			selector.mu.Unlock()
+		}
+		got, _, provider, err := manager.pickNextMixed(context.Background(), []string{"claude"}, model, cliproxyexecutor.Options{}, nil)
+		if err != nil || got == nil || provider != "claude" {
+			t.Fatalf("pickNextMixed = %v, %q, %v", got, provider, err)
+		}
+		if i == 0 && got.ID != "mixed-known" {
+			t.Fatalf("initial selection = %s; want mixed-known", got.ID)
+		}
+		counts[got.ID]++
+	}
+	for _, auth := range auths {
+		if counts[auth.ID] != 1 {
+			t.Fatalf("mixed probe counts = %v; want each credential once", counts)
+		}
+	}
+}
+
 func TestUseOrLoseProbeSurvivesIdleAndIsModelScoped(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
@@ -196,14 +312,14 @@ func TestUseOrLoseConcurrentProbes(t *testing.T) {
 	now := time.Now()
 	selector := &UseOrLoseSelector{}
 	auths := []*Auth{useOrLoseTestAuth("known", now, 24*time.Hour, .5), {ID: "unknown-a", Provider: "claude"}, {ID: "unknown-b", Provider: "claude"}}
-	if _, err := selector.pick(context.Background(), "claude", "claude-opus-5-5", auths, now); err != nil {
+	if _, err := selector.pick(context.Background(), "mixed", "claude-opus-5-5", auths, now); err != nil {
 		t.Fatal(err)
 	}
 	results := make(chan string, 32)
 	var wg sync.WaitGroup
 	for range 32 {
 		wg.Go(func() {
-			got, err := selector.pick(context.Background(), "claude", "claude-opus-5-5", auths, now.Add(time.Minute))
+			got, err := selector.pick(context.Background(), "mixed", "claude-opus-5-5", auths, now.Add(time.Minute))
 			if err != nil {
 				t.Error(err)
 				return
@@ -345,6 +461,47 @@ func TestUseOrLoseCodexWindows(t *testing.T) {
 	}
 }
 
+func TestUseOrLoseWeeklyLimitExpiry(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	for _, reset := range []time.Time{now.Add(time.Minute), now} {
+		auth := useOrLoseTestAuth("limited", now, 24*time.Hour, 1)
+		useOrLoseTestWindow(auth, "7d", reset, 1)
+		auth.Quota.Signals["Anthropic-Ratelimit-Unified-7d-Status"] = "rejected"
+		for _, hasUsage := range []bool{true, false} {
+			if !hasUsage {
+				delete(auth.Quota.Signals, "Anthropic-Ratelimit-Unified-7d-Utilization")
+			}
+			if got := useOrLoseSampleFor(auth, "claude-opus-5-5", now).atLimit; got != reset.After(now) {
+				t.Fatalf("reset %s, hasUsage %t: atLimit = %t", reset, hasUsage, got)
+			}
+		}
+	}
+}
+
+func TestUseOrLoseCodexWeeklyLimit(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	limited := &Auth{ID: "limited", Provider: "codex", Quota: QuotaState{ObservedAt: now, Signals: map[string]string{
+		"X-Codex-Secondary-Window-Minutes": "10080",
+		"X-Codex-Secondary-Used-Percent":   "100",
+		"X-Codex-Secondary-Reset-At":       now.Add(24 * time.Hour).Format(time.RFC3339),
+	}}}
+	room := limited.Clone()
+	room.ID = "room"
+	room.Quota.Signals["X-Codex-Secondary-Used-Percent"] = "50"
+	room.Quota.Signals["X-Codex-Secondary-Reset-At"] = now.Add(48 * time.Hour).Format(time.RFC3339)
+	for _, tc := range []struct {
+		auths []*Auth
+		want  string
+	}{{[]*Auth{limited, room}, "room"}, {[]*Auth{limited}, "limited"}} {
+		got, err := (&UseOrLoseSelector{}).pick(context.Background(), "mixed", "model", tc.auths, now)
+		if err != nil || got == nil || got.ID != tc.want {
+			t.Fatalf("Pick = %v, %v; want %s", got, err, tc.want)
+		}
+	}
+}
+
 func TestUseOrLoseEqualWeeksFollowUtilisationUpdates(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
@@ -387,11 +544,43 @@ func TestUseOrLoseUnsupportedProviderKeepsFillFirst(t *testing.T) {
 	selector := &UseOrLoseSelector{}
 	now := time.Now()
 	auths := []*Auth{{ID: "z", Provider: "gemini"}, {ID: "a", Provider: "gemini"}}
-	for _, at := range []time.Time{now, now.Add(time.Hour)} {
-		got, err := selector.pick(context.Background(), "gemini", "model", auths, at)
-		if err != nil || got.ID != "z" {
-			t.Fatalf("Pick = %v, %v; want z", got, err)
+	for _, provider := range []string{"gemini", "mixed"} {
+		for _, at := range []time.Time{now, now.Add(time.Hour)} {
+			got, err := selector.pick(context.Background(), provider, "model", auths, at)
+			if err != nil || got == nil || got.ID != "z" {
+				t.Fatalf("Pick = %v, %v; want z", got, err)
+			}
 		}
+	}
+	if len(selector.probes) != 0 {
+		t.Fatalf("unsupported provider probes = %v", selector.probes)
+	}
+}
+
+func TestUseOrLoseSessionAffinityWeeklyLimit(t *testing.T) {
+	for _, model := range []string{"claude-opus-5-5", "claude-fable-5-1"} {
+		t.Run(model, func(t *testing.T) {
+			now := time.Now()
+			selector := NewSessionAffinitySelector(&UseOrLoseSelector{})
+			defer selector.Stop()
+			opts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"session_id":"use-or-lose-weekly-bound"}`)}
+			bound := useOrLoseTestAuth("bound", now, 24*time.Hour, .5)
+			other := useOrLoseTestAuth("other", now, 48*time.Hour, .2)
+			window := "7d"
+			if model == "claude-fable-5-1" {
+				window = "7d_oi"
+			}
+			for _, tc := range []struct {
+				used float64
+				want string
+			}{{.5, "bound"}, {1, "other"}} {
+				useOrLoseTestWindow(bound, window, now.Add(24*time.Hour), tc.used)
+				got, err := selector.Pick(context.Background(), "mixed", model, opts, []*Auth{bound, other})
+				if err != nil || got == nil || got.ID != tc.want {
+					t.Fatalf("Pick = %v, %v; want %s", got, err, tc.want)
+				}
+			}
+		})
 	}
 }
 

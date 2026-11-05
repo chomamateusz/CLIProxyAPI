@@ -34,12 +34,18 @@ type useOrLoseWindow struct {
 	utilisation float64
 	observed    time.Time
 	hasUsage    bool
+	rejected    bool
+}
+
+func (w useOrLoseWindow) usable(now time.Time) bool {
+	return w.hasUsage && w.reset.After(now) && w.observed.Add(7*24*time.Hour).After(now)
 }
 
 type useOrLoseSample struct {
 	window  useOrLoseWindow
 	sampled bool
 	capped  bool
+	atLimit bool
 }
 
 func (s *UseOrLoseSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
@@ -87,11 +93,7 @@ func (s *UseOrLoseSelector) pick(ctx context.Context, provider, model string, au
 			selected, found = auth, true
 		}
 	}
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	if provider == "claude" || provider == "codex" {
-		selected = s.probeUnsampled(provider, model, ordered, samples, selected, now)
-	}
-	return selected, nil
+	return s.probeUnsampled(model, ordered, samples, selected, now), nil
 }
 
 func useOrLoseSampleFor(auth *Auth, model string, now time.Time) useOrLoseSample {
@@ -101,7 +103,7 @@ func useOrLoseSampleFor(auth *Auth, model string, now time.Time) useOrLoseSample
 	case "claude":
 		weekly, _ = useOrLoseClaudeWindow(observations, "7d")
 		if strings.Contains(strings.ToLower(model), "fable") {
-			if fable, reported := useOrLoseClaudeWindow(observations, "7d_oi"); reported {
+			if fable, _ := useOrLoseClaudeWindow(observations, "7d_oi"); fable.usable(now) {
 				weekly = fable
 			}
 		}
@@ -133,8 +135,9 @@ func useOrLoseSampleFor(auth *Auth, model string, now time.Time) useOrLoseSample
 	shortActive := short.reset.After(now) || short.reset.IsZero() && short.observed.Add(5*time.Hour).After(now)
 	return useOrLoseSample{
 		window:  weekly,
-		sampled: weekly.hasUsage && weekly.reset.After(now) && weekly.observed.Add(7*24*time.Hour).After(now),
+		sampled: weekly.usable(now),
 		capped:  short.hasUsage && short.utilisation >= 0.95 && shortActive,
+		atLimit: weekly.reset.After(now) && (weekly.hasUsage && weekly.utilisation >= 1 || weekly.rejected),
 	}
 }
 
@@ -144,13 +147,14 @@ func useOrLoseClaudeWindow(observations []QuotaState, name string) (useOrLoseWin
 	window := useOrLoseWindow{observed: quota.ObservedAt}
 	window.utilisation, window.hasUsage = quotaSignalNumber(quota.Signals[prefix+"Utilization"])
 	window.reset, _ = quotaSignalReset(quota.Signals[prefix+"Reset"])
+	window.rejected = strings.EqualFold(strings.TrimSpace(quota.Signals[prefix+"Status"]), "rejected")
 	return window, ok
 }
 
 func preferUseOrLoseRoom(auths []*Auth, samples map[*Auth]useOrLoseSample) []*Auth {
 	room := make([]*Auth, 0, len(auths))
 	for _, auth := range auths {
-		if !samples[auth].capped {
+		if sample := samples[auth]; !sample.capped && !sample.atLimit {
 			room = append(room, auth)
 		}
 	}
@@ -160,19 +164,22 @@ func preferUseOrLoseRoom(auths []*Auth, samples map[*Auth]useOrLoseSample) []*Au
 	return auths
 }
 
-func (s *UseOrLoseSelector) probeUnsampled(provider, model string, auths []*Auth, samples map[*Auth]useOrLoseSample, selected *Auth, now time.Time) *Auth {
+func (s *UseOrLoseSelector) probeUnsampled(model string, auths []*Auth, samples map[*Auth]useOrLoseSample, selected *Auth, now time.Time) *Auth {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.probes == nil {
 		s.probes = make(map[useOrLoseProbeKey]useOrLoseProbe)
 	}
 	keyFor := func(auth *Auth) useOrLoseProbeKey {
-		return useOrLoseProbeKey{provider: provider, id: auth.ID, fable: strings.Contains(strings.ToLower(model), "fable")}
+		return useOrLoseProbeKey{provider: strings.ToLower(strings.TrimSpace(auth.Provider)), id: auth.ID, fable: strings.Contains(strings.ToLower(model), "fable")}
 	}
 	var probe *Auth
 	var oldest useOrLoseProbe
 	for _, auth := range auths {
 		key := keyFor(auth)
+		if key.provider != "claude" && key.provider != "codex" {
+			continue
+		}
 		if samples[auth].sampled {
 			delete(s.probes, key)
 			continue
@@ -190,8 +197,8 @@ func (s *UseOrLoseSelector) probeUnsampled(provider, model string, auths []*Auth
 	if probe != nil {
 		selected = probe
 	}
-	if !samples[selected].sampled {
-		s.probes[keyFor(selected)] = useOrLoseProbe{after: now.Add(useOrLoseProbeInterval), seen: now, attempted: now}
+	if key := keyFor(selected); !samples[selected].sampled && (key.provider == "claude" || key.provider == "codex") {
+		s.probes[key] = useOrLoseProbe{after: now.Add(useOrLoseProbeInterval), seen: now, attempted: now}
 	}
 	if now.Sub(s.lastPruned) >= useOrLoseProbeInterval {
 		for key, entry := range s.probes {
