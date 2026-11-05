@@ -12,7 +12,7 @@ import (
 
 type claudeUsageWindow struct {
 	Utilization      *float64 `json:"utilization"`
-	ResetsAt         string   `json:"resets_at"`
+	ResetsAt         *string  `json:"resets_at"`
 	LimitDollars     *float64 `json:"limit_dollars"`
 	UsedDollars      *float64 `json:"used_dollars"`
 	RemainingDollars *float64 `json:"remaining_dollars"`
@@ -25,7 +25,7 @@ type claudeUsagePayload struct {
 	Limits   []struct {
 		Kind     string   `json:"kind"`
 		Percent  *float64 `json:"percent"`
-		ResetsAt string   `json:"resets_at"`
+		ResetsAt *string  `json:"resets_at"`
 		Active   bool     `json:"is_active"`
 		Scope    struct {
 			Model struct {
@@ -48,13 +48,19 @@ func parseQuotaSample(provider string, body []byte, now time.Time) (http.Header,
 		if window == nil || window.Utilization == nil || !validQuotaPercentage(*window.Utilization) {
 			return false
 		}
-		reset, err := time.Parse(time.RFC3339Nano, window.ResetsAt)
-		if err != nil || !reset.After(now) {
-			return false
-		}
 		prefix := "Anthropic-Ratelimit-Unified-" + name + "-"
+		if window.ResetsAt == nil {
+			if *window.Utilization != 0 {
+				return false
+			}
+		} else {
+			reset, err := time.Parse(time.RFC3339Nano, *window.ResetsAt)
+			if err != nil || !reset.After(now) {
+				return false
+			}
+			headers.Set(prefix+"Reset", reset.Format(time.RFC3339Nano))
+		}
 		headers.Set(prefix+"Utilization", strconv.FormatFloat(*window.Utilization/100, 'f', -1, 64))
-		headers.Set(prefix+"Reset", reset.Format(time.RFC3339Nano))
 		status := "allowed"
 		if *window.Utilization >= 100 {
 			status = "rejected"
@@ -85,6 +91,24 @@ func parseQuotaSample(provider string, body []byte, now time.Time) (http.Header,
 	}
 	add("7d_oi", fable)
 	return headers, nil
+}
+
+func zeroUsageShape(body []byte) map[string]any {
+	var payload map[string]json.RawMessage
+	if json.Unmarshal(body, &payload) != nil {
+		return nil
+	}
+	shape := make(map[string]any)
+	for _, name := range []string{"seven_day", "five_hour", "iguana_necktie"} {
+		var window struct {
+			Utilization *float64        `json:"utilization"`
+			ResetsAt    json.RawMessage `json:"resets_at"`
+		}
+		if json.Unmarshal(payload[name], &window) == nil && window.Utilization != nil && *window.Utilization == 0 && strings.TrimSpace(string(window.ResetsAt)) == "null" {
+			shape[name] = map[string]any{"utilization": *window.Utilization, "resets_at": nil}
+		}
+	}
+	return shape
 }
 
 func validQuotaPercentage(value float64) bool {

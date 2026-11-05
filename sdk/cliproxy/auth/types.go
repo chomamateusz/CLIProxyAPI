@@ -115,6 +115,7 @@ type Auth struct {
 	RejectedSIWCAccessToken string `json:"-"`
 
 	sampledQuota  QuotaState
+	sampledFable  bool
 	lastRequestAt time.Time
 	Success       int64 `json:"-"`
 	Failed        int64 `json:"-"`

@@ -376,11 +376,14 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	if existingVersion == 0 {
 		existingVersion = 1
 	}
-	credChanged := CredentialsChanged(existing, auth)
-	if credChanged {
+	accountChanged := quotaAccountChanged(existing, auth)
+	credChanged := CredentialsChanged(existing, auth) || accountChanged
+	if accountChanged {
 		auth.sampledQuota = QuotaState{}
+		auth.sampledFable = false
 	} else {
 		auth.sampledQuota = existing.sampledQuota.Clone()
+		auth.sampledFable = existing.sampledFable
 	}
 	if credChanged {
 		auth.CredentialVersion = max(auth.CredentialVersion, existingVersion) + 1
@@ -498,6 +501,9 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	}
 	if existing.Generation >= auth.Generation {
 		auth.Generation = existing.Generation + 1
+	}
+	if accountChanged {
+		clearQuotaObservations(auth)
 	}
 	auth.ClearFileSnapshot()
 	authClone := auth.Clone()

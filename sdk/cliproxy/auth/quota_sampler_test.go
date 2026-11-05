@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
@@ -64,7 +65,7 @@ func TestSamplerProductionThreeCredentials(t *testing.T) {
 			var calls atomic.Int32
 			m.SetRoundTripperProvider(samplerTransport(func(r *http.Request) (*http.Response, error) {
 				calls.Add(1)
-				if r.Method != http.MethodGet || r.URL.String() != "https://api.anthropic.com/api/oauth/usage" || r.Header.Get("Anthropic-Beta") != "oauth-2025-04-20" || r.Header.Get("Content-Type") != "application/json" || r.Header.Get("User-Agent") != "claude-cli/2.1.280 (external, cli)" {
+				if r.Method != http.MethodGet || r.URL.String() != "https://api.anthropic.com/api/oauth/usage" || r.Header.Get("Anthropic-Beta") != "oauth-2025-04-20" || r.Header.Get("Content-Type") != "application/json" || r.Header.Get("User-Agent") != constant.ClaudeUserAgent {
 					t.Error("unexpected usage request")
 				}
 				switch r.Header.Get("Authorization") {
@@ -340,7 +341,7 @@ func TestSamplerCodexKnownEndpoint(t *testing.T) {
 	m := NewManager(nil, &UseOrLoseSelector{}, nil)
 	samplerRegister(t, m, &Auth{ID: "codex", Provider: "codex", Metadata: map[string]any{"access_token": "fake-codex", "account_id": "fake-account"}})
 	m.SetRoundTripperProvider(samplerTransport(func(r *http.Request) (*http.Response, error) {
-		if r.URL.String() != "https://chatgpt.com/backend-api/wham/usage" || r.Header.Get("Chatgpt-Account-Id") != "fake-account" {
+		if r.URL.String() != "https://chatgpt.com/backend-api/wham/usage" || r.Header.Get("Chatgpt-Account-Id") != "fake-account" || r.Header.Get("User-Agent") != constant.CodexUserAgent {
 			t.Error("unexpected Codex request")
 		}
 		return samplerResponse(fmt.Sprintf(`{"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":97,"limit_window_seconds":18000,"reset_at":%d},"secondary_window":{"used_percent":30,"limit_window_seconds":604800,"reset_at":%d}},"credits":{"has_credits":true,"unlimited":false,"balance":"10"}}`, now.Add(time.Hour).Unix(), now.Add(24*time.Hour).Unix())), nil

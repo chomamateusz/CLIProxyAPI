@@ -12,12 +12,14 @@ import (
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
 const quotaSampleInterval = 5 * time.Minute
 const quotaSampleIdleAge = 15 * time.Minute
+const quotaSampleTimeout = 30 * time.Second
 
 type quotaSampleJob struct {
 	epoch    uint64
@@ -29,14 +31,16 @@ type quotaSampleJob struct {
 }
 
 type quotaSampler struct {
-	manager   *Manager
-	lifecycle sync.Mutex
-	mu        sync.Mutex
-	jobs      map[string]*quotaSampleJob
-	wake      chan struct{}
-	cancel    context.CancelFunc
-	done      chan struct{}
-	workers   sync.WaitGroup
+	manager         *Manager
+	lifecycle       sync.Mutex
+	mu              sync.Mutex
+	jobs            map[string]*quotaSampleJob
+	wake            chan struct{}
+	cancel          context.CancelFunc
+	done            chan struct{}
+	workers         sync.WaitGroup
+	running         bool
+	zeroUsageLogged sync.Once
 }
 
 func newQuotaSampler(m *Manager) *quotaSampler {
@@ -57,8 +61,16 @@ func (s *quotaSampler) start(parent context.Context) {
 	ctx, cancel := context.WithCancel(parent)
 	s.cancel = cancel
 	s.done = make(chan struct{})
+	s.mu.Lock()
+	s.running = true
+	s.mu.Unlock()
 	go func() {
 		defer close(s.done)
+		defer func() {
+			s.mu.Lock()
+			s.running = false
+			s.mu.Unlock()
+		}()
 		defer s.workers.Wait()
 		ticker := time.NewTicker(quotaSampleInterval)
 		defer ticker.Stop()
@@ -125,7 +137,26 @@ func quotaSampleEligible(a *Auth) bool {
 	return provider == "claude" || provider == "codex"
 }
 
+func (s *quotaSampler) pending(a *Auth) bool {
+	if s == nil || !quotaSampleEligible(a) {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job := s.jobs[a.ID]
+	if job != nil && job.inFlight {
+		return true
+	}
+	return s.running && (job == nil || job.epoch != a.RegistrationEpoch || job.version != a.CredentialVersion || job.next.IsZero())
+}
+
 func quotaSampleNeeded(a *Auth, now time.Time) bool {
+	if strings.EqualFold(strings.TrimSpace(a.Provider), "claude") && a.sampledFable {
+		fable, _ := useOrLoseClaudeWindow(quotaObservations(a), "7d_oi")
+		if !fable.usable(now) {
+			return true
+		}
+	}
 	selector := &UseOrLoseSelector{}
 	for _, model := range []string{"", "fable"} {
 		sample := selector.sampleFor(a, model, now)
@@ -221,6 +252,9 @@ func (m *Manager) applyQuotaSample(ctx context.Context, base *Auth, headers http
 		return false
 	}
 	changed := a.sampledQuota.ObserveResponseHeadersForProvider(a.Provider, headers, started)
+	if changed && headers.Get("Anthropic-Ratelimit-Unified-7d_oi-Utilization") != "" {
+		a.sampledFable = true
+	}
 	if changed && !a.Quota.ObservedAt.After(started) {
 		a.Quota.ObserveResponseHeadersForProvider(a.Provider, headers, started)
 	}
@@ -237,6 +271,8 @@ func (m *Manager) applyQuotaSample(ctx context.Context, base *Auth, headers http
 }
 
 func (m *Manager) fetchQuotaSample(ctx context.Context, a *Auth) (http.Header, error) {
+	ctx, cancel := context.WithTimeout(ctx, quotaSampleTimeout)
+	defer cancel()
 	provider := strings.ToLower(strings.TrimSpace(a.Provider))
 	endpoint := "https://api.anthropic.com/api/oauth/usage"
 	if provider == "codex" {
@@ -249,10 +285,10 @@ func (m *Manager) fetchQuotaSample(ctx context.Context, a *Auth) (http.Header, e
 	req.Header.Set("Authorization", "Bearer "+authAccessToken(a))
 	req.Header.Set("Content-Type", "application/json")
 	if provider == "claude" {
-		req.Header.Set("User-Agent", "claude-cli/2.1.280 (external, cli)")
+		req.Header.Set("User-Agent", constant.ClaudeUserAgent)
 		req.Header.Set("Anthropic-Beta", "oauth-2025-04-20")
 	} else {
-		req.Header.Set("User-Agent", "codex-tui/0.149.1 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.149.1)")
+		req.Header.Set("User-Agent", constant.CodexUserAgent)
 		if id := authMetadataString(a, "account_id"); id != "" {
 			req.Header.Set("Chatgpt-Account-Id", id)
 		}
@@ -291,7 +327,15 @@ func (m *Manager) fetchQuotaSample(ctx context.Context, a *Auth) (http.Header, e
 	if err != nil || len(body) > 1<<20 {
 		return nil, errors.New("invalid response body")
 	}
-	return parseQuotaSample(provider, body, time.Now())
+	headers, err := parseQuotaSample(provider, body, time.Now())
+	if err == nil && provider == "claude" && log.IsLevelEnabled(log.DebugLevel) {
+		if shape := zeroUsageShape(body); len(shape) != 0 {
+			m.quotaSampler.zeroUsageLogged.Do(func() {
+				log.WithField("windows", shape).Debug("quota sample zero-usage shape")
+			})
+		}
+	}
+	return headers, err
 }
 
 func logQuotaSample(a *Auth, headers http.Header) {

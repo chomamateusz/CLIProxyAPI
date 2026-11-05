@@ -691,6 +691,7 @@ func (m *Manager) useOrLoseSelectionContext(ctx context.Context, selector Select
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx = context.WithValue(ctx, useOrLoseSamplerKey{}, m.quotaSampler)
 	return context.WithValue(ctx, useOrLoseSelectionModelsKey{}, models)
 }
 

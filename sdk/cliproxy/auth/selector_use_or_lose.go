@@ -39,10 +39,12 @@ type useOrLoseWindow struct {
 	observed    time.Time
 	hasUsage    bool
 	rejected    bool
+	allowed     bool
 }
 
 func (w useOrLoseWindow) usable(now time.Time) bool {
-	return w.hasUsage && w.reset.After(now) && w.observed.Add(7*24*time.Hour).After(now)
+	active := w.reset.After(now) || w.reset.IsZero() && w.allowed && w.utilisation == 0 && w.observed.Add(quotaSampleIdleAge).After(now)
+	return w.hasUsage && active && w.observed.Add(7*24*time.Hour).After(now)
 }
 
 type useOrLoseSample struct {
@@ -53,6 +55,7 @@ type useOrLoseSample struct {
 }
 
 type useOrLoseSelectionModelsKey struct{}
+type useOrLoseSamplerKey struct{}
 
 func useOrLoseSelectionModel(ctx context.Context, auth *Auth, model string) string {
 	if ctx != nil {
@@ -98,7 +101,7 @@ func (s *UseOrLoseSelector) pick(ctx context.Context, provider, model string, au
 	var earliest time.Time
 	for _, auth := range ordered {
 		sample := samples[auth]
-		if sample.sampled && (earliest.IsZero() || sample.window.reset.Before(earliest)) {
+		if sample.sampled && !sample.window.reset.IsZero() && (earliest.IsZero() || sample.window.reset.Before(earliest)) {
 			earliest = sample.window.reset
 		}
 	}
@@ -107,7 +110,7 @@ func (s *UseOrLoseSelector) pick(ctx context.Context, provider, model string, au
 	for _, auth := range ordered {
 		sample := samples[auth]
 		// Anchor the tie group to the earliest reset; pairwise one-hour comparisons are not transitive.
-		if !sample.sampled || sample.window.reset.After(earliest.Add(time.Hour)) {
+		if !sample.sampled || !earliest.IsZero() && (sample.window.reset.IsZero() || sample.window.reset.After(earliest.Add(time.Hour))) {
 			continue
 		}
 		best := samples[selected].window
@@ -190,6 +193,7 @@ func useOrLoseClaudeWindow(observations []QuotaState, name string) (useOrLoseWin
 	window.utilisation, window.hasUsage = quotaSignalNumber(quota.Signals[prefix+"Utilization"])
 	window.reset, _ = quotaSignalReset(quota.Signals[prefix+"Reset"])
 	window.rejected = strings.EqualFold(strings.TrimSpace(quota.Signals[prefix+"Status"]), "rejected")
+	window.allowed = strings.EqualFold(strings.TrimSpace(quota.Signals[prefix+"Status"]), "allowed")
 	return window, ok
 }
 
@@ -225,6 +229,10 @@ func (s *UseOrLoseSelector) probeUnsampled(ctx context.Context, model string, au
 	keyFor := func(auth *Auth) useOrLoseProbeKey {
 		return useOrLoseProbeKey{provider: strings.ToLower(strings.TrimSpace(auth.Provider)), id: auth.ID, fable: strings.Contains(strings.ToLower(useOrLoseSelectionModel(ctx, auth, model)), "fable")}
 	}
+	var sampler *quotaSampler
+	if ctx != nil {
+		sampler, _ = ctx.Value(useOrLoseSamplerKey{}).(*quotaSampler)
+	}
 	var probe *Auth
 	var oldest useOrLoseProbe
 	for _, auth := range auths {
@@ -234,6 +242,9 @@ func (s *UseOrLoseSelector) probeUnsampled(ctx context.Context, model string, au
 		}
 		if samples[auth].sampled {
 			delete(s.probes, key)
+			continue
+		}
+		if sampler.pending(auth) {
 			continue
 		}
 		entry, seen := s.probes[key]

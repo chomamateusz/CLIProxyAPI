@@ -58,7 +58,11 @@ func (w *Watcher) reloadConfigIfChanged() {
 
 	data, err := os.ReadFile(w.configPath)
 	if err != nil {
-		log.Errorf("failed to read config file for hash check: %v", err)
+		if os.IsNotExist(err) {
+			log.Debug("config file absent; retaining current configuration")
+		} else {
+			log.Errorf("failed to read config file for hash check: %v", err)
+		}
 		return
 	}
 	if len(data) == 0 {

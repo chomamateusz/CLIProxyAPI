@@ -12,12 +12,27 @@ import (
 )
 
 func TestWatcherConfigAtomicReplaceRetainsWatch(t *testing.T) {
+	for _, symlink := range []bool{false, true} {
+		t.Run(fmt.Sprint(symlink), func(t *testing.T) {
+			testWatcherConfigAtomicReplace(t, symlink)
+		})
+	}
+}
+
+func testWatcherConfigAtomicReplace(t *testing.T, symlink bool) {
 	configPath, authDir := newIssue6631ConfigFile(t)
 	content := func(strategy string, affinity bool) []byte {
 		return []byte(fmt.Sprintf("auth-dir: %q\nrouting:\n  strategy: %s\n  session-affinity: %t\n", filepath.ToSlash(authDir), strategy, affinity))
 	}
 	if err := os.WriteFile(configPath, content("round-robin", false), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	writePath := configPath
+	if symlink {
+		configPath = filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.Symlink(writePath, configPath); err != nil {
+			t.Fatal(err)
+		}
 	}
 	type routing struct {
 		strategy string
@@ -60,16 +75,16 @@ func TestWatcherConfigAtomicReplaceRetainsWatch(t *testing.T) {
 	}
 	await(routing{"round-robin", false})
 	for _, next := range []routing{{"use-or-lose", true}, {"fill-first", false}} {
-		replacement := configPath + ".replacement"
+		replacement := writePath + ".replacement"
 		if err := os.WriteFile(replacement, content(next.strategy, next.affinity), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Rename(replacement, configPath); err != nil {
+		if err := os.Rename(replacement, writePath); err != nil {
 			t.Fatal(err)
 		}
 		await(next)
 	}
-	if err := os.WriteFile(configPath, content("use-or-lose", true), 0o600); err != nil {
+	if err := os.WriteFile(writePath, content("use-or-lose", true), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	await(routing{"use-or-lose", true})
