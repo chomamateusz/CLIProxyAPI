@@ -5,8 +5,11 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"gopkg.in/yaml.v3"
 )
 
@@ -53,15 +56,48 @@ func TestUseOrLoseConfigDefaultsAndRoundTrip(t *testing.T) {
 
 func TestUseOrLoseShortWindowCapNormalization(t *testing.T) {
 	t.Parallel()
-	for _, value := range []float64{0, -1, 101, math.NaN(), math.Inf(1), math.Inf(-1), .1, 80.5, 95, 100} {
+	for _, value := range []float64{0, -1, 101, math.NaN(), math.Inf(1), math.Inf(-1), .1, .95, 1, 1.01, 80.5, 95, 100} {
 		t.Run(fmt.Sprint(value), func(t *testing.T) {
 			want := float64(95)
-			if value > 0 && value <= 100 {
+			if value > 1 && value <= 100 {
 				want = value
 			}
 			if got := (UseOrLoseConfig{ShortWindowCapPct: value}).EffectiveShortWindowCapPct(); got != want {
 				t.Fatalf("cap = %g; want %g", got, want)
 			}
 		})
+	}
+}
+
+func TestUseOrLoseInvalidCapWarnsInPercentUnits(t *testing.T) {
+	logger := log.StandardLogger()
+	originalHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	defer logger.ReplaceHooks(originalHooks)
+	hook := logtest.NewGlobal()
+	for _, value := range []string{"-1", "0", "0.95", "1", "101", ".nan", ".inf"} {
+		t.Run(value, func(t *testing.T) {
+			hook.Reset()
+			var cfg Config
+			if err := yaml.Unmarshal([]byte("routing: {strategy: use-or-lose, use-or-lose: {short-window-cap-pct: "+value+"}}"), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Routing.UseOrLose.ShortWindowCapPct != 95 {
+				t.Fatalf("cap = %g; want 95", cfg.Routing.UseOrLose.ShortWindowCapPct)
+			}
+			entries := hook.AllEntries()
+			if len(entries) != 1 || entries[0].Level != log.WarnLevel || !strings.Contains(entries[0].Message, "percentage greater than 1 and at most 100") || !strings.Contains(entries[0].Message, "using 95") {
+				t.Fatalf("missing percentage/default warning: %+v", entries)
+			}
+		})
+	}
+	for _, routing := range []string{"strategy: use-or-lose", "strategy: use-or-lose, use-or-lose: {short-window-cap-pct: 80.5}"} {
+		hook.Reset()
+		var cfg Config
+		if err := yaml.Unmarshal([]byte("routing: {"+routing+"}"), &cfg); err != nil {
+			t.Fatal(err)
+		}
+		if len(hook.AllEntries()) != 0 {
+			t.Fatal("valid or omitted cap must not warn")
+		}
 	}
 }

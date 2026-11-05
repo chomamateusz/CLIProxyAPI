@@ -80,7 +80,7 @@ func TestUseOrLoseAffinityConfiguredThreshold(t *testing.T) {
 	}
 }
 
-func TestUseOrLoseAffinityAllCappedReranks(t *testing.T) {
+func TestUseOrLoseAffinityAllCappedRetainsBinding(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 	selector := NewSessionAffinitySelector(&UseOrLoseSelector{})
@@ -94,8 +94,17 @@ func TestUseOrLoseAffinityAllCappedReranks(t *testing.T) {
 	useOrLoseTestWindow(a, "5h", now.Add(time.Hour), .96)
 	useOrLoseTestWindow(b, "5h", now.Add(time.Hour), .96)
 	useOrLoseTestWindow(b, "7d", now.Add(12*time.Hour), .2)
+	if got, err := selector.Pick(context.Background(), "claude", "claude-opus-5-5", opts, []*Auth{a, b}); err != nil || got.ID != "a" {
+		t.Fatalf("capped Pick = %v, %v; want a", got, err)
+	}
+	useOrLoseTestWindow(b, "5h", now.Add(time.Hour), .94)
 	if got, err := selector.Pick(context.Background(), "claude", "claude-opus-5-5", opts, []*Auth{a, b}); err != nil || got.ID != "b" {
-		t.Fatalf("capped Pick = %v, %v; want b", got, err)
+		t.Fatalf("available room Pick = %v, %v; want b", got, err)
+	}
+	useOrLoseTestWindow(a, "5h", now.Add(time.Hour), .1)
+	useOrLoseTestWindow(a, "7d", now.Add(time.Hour), .1)
+	if got, err := selector.Pick(context.Background(), "claude", "claude-opus-5-5", opts, []*Auth{a, b}); err != nil || got.ID != "b" {
+		t.Fatalf("recovered original Pick = %v, %v; want b", got, err)
 	}
 }
 

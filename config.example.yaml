@@ -173,7 +173,7 @@ routing:
   # still decides cold bindings, requests without a session, and post-failover rebinding.
   session-affinity: true # use-or-lose default: true; other strategies default: false
   use-or-lose:
-    short-window-cap-pct: 95
+    short-window-cap-pct: 95 # Percent (1 < value <= 100), not a fraction; invalid values use 95.
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
   # When true (default), subagents (child sessions with parent references) inherit and bind

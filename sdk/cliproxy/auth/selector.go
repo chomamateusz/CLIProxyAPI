@@ -1022,10 +1022,7 @@ func isStateBlockedByQuotaOrAuth(unavailable bool, quota QuotaState, nextRetryAf
 }
 
 func (s *SessionAffinitySelector) shouldPreserveBindingWhenUnavailable(ctx context.Context, candidates []*Auth, model, authID string, now time.Time) bool {
-	if s == nil || !s.rebindOnQuotaOnly || authID == "" {
-		return false
-	}
-	if _, useOrLose := s.fallback.(*UseOrLoseSelector); useOrLose {
+	if s == nil || !s.preservesTransientFailures() || authID == "" {
 		return false
 	}
 	if ctx != nil {
@@ -1034,6 +1031,9 @@ func (s *SessionAffinitySelector) shouldPreserveBindingWhenUnavailable(ctx conte
 			_, ok := transientAuthIDs[authID]
 			return ok
 		}
+	}
+	if _, useOrLose := s.fallback.(*UseOrLoseSelector); useOrLose {
+		return false
 	}
 	for _, candidate := range candidates {
 		if candidate != nil && candidate.ID == authID {
@@ -1112,7 +1112,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		samples := make(map[*Auth]useOrLoseSample, len(auths))
 		for _, auth := range auths {
 			if auth != nil {
-				samples[auth] = useOrLose.sampleFor(auth, model, now)
+				samples[auth] = useOrLose.sampleFor(auth, useOrLoseSelectionModel(ctx, auth, model), now)
 			}
 		}
 		auths = preferUseOrLoseRoom(auths, samples)
@@ -1219,7 +1219,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
-			if auth.ID == cachedAuthID && s.canRetainBinding(auth, model, now) {
+			if auth.ID == cachedAuthID {
 				bind(auth.ID, true)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 				return auth, nil
@@ -1257,7 +1257,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 		if parentAuthID := s.cache.latestSessionAuth(fallbackID, providers); parentAuthID != "" {
 			for _, auth := range available {
-				if auth.ID == parentAuthID && s.canRetainBinding(auth, model, now) {
+				if auth.ID == parentAuthID {
 					bind(auth.ID, true)
 					entry.Infof("session-affinity: guardian inherited parent binding | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 					return auth, nil
@@ -1269,7 +1269,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if fallbackKey != "" {
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
 			for _, auth := range available {
-				if auth.ID == cachedAuthID && s.canRetainBinding(auth, model, now) {
+				if auth.ID == cachedAuthID {
 					if !isSubagent || s.subagentAffinity {
 						bind(auth.ID, true)
 						if isFork {
@@ -1348,7 +1348,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	var preservedAuthID string
 	if match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength); ok {
 		for _, auth := range available {
-			if auth == nil || auth.ID != match.AuthID || !s.canRetainBinding(auth, model, now) {
+			if auth == nil || auth.ID != match.AuthID {
 				continue
 			}
 			if match.SessionID != "" {
@@ -1704,9 +1704,7 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		// selected credential is unhealthy, so preserve both explicit and LCP bindings.
 		return
 	}
-	if !res.Success && s.rebindOnQuotaOnly && !shouldRebindSessionAffinityOnError(res.Error) {
-		// Under session-affinity-rebind-on: quota, transient failures fail over for
-		// the current request without unbinding the session from its bound credential.
+	if !res.Success && s.preservesTransientFailures() && !shouldRebindSessionAffinityOnError(res.Error) {
 		return
 	}
 
