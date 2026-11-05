@@ -472,7 +472,7 @@ func TestUseOrLoseWeeklyLimitExpiry(t *testing.T) {
 			if !hasUsage {
 				delete(auth.Quota.Signals, "Anthropic-Ratelimit-Unified-7d-Utilization")
 			}
-			if got := useOrLoseSampleFor(auth, "claude-opus-5-5", now).atLimit; got != reset.After(now) {
+			if got := (&UseOrLoseSelector{}).sampleFor(auth, "claude-opus-5-5", now).atLimit; got != reset.After(now) {
 				t.Fatalf("reset %s, hasUsage %t: atLimit = %t", reset, hasUsage, got)
 			}
 		}

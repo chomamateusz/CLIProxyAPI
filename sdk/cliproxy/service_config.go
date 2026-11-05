@@ -55,19 +55,21 @@ type configCommit struct {
 }
 
 type routingRuntimeState struct {
-	strategy                 string
-	sessionAffinity          bool
-	sessionAffinityTTL       time.Duration
-	sessionAffinitySubagents bool
-	sessionAffinityRebindOn  string
+	strategy                   string
+	useOrLoseShortWindowCapPct float64
+	sessionAffinity            bool
+	sessionAffinityTTL         time.Duration
+	sessionAffinitySubagents   bool
+	sessionAffinityRebindOn    string
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	state := routingRuntimeState{
-		strategy:                 "round-robin",
-		sessionAffinityTTL:       time.Hour,
-		sessionAffinitySubagents: true,
-		sessionAffinityRebindOn:  coreauth.SessionAffinityRebindOnAny,
+		strategy:                   "round-robin",
+		useOrLoseShortWindowCapPct: config.DefaultUseOrLoseShortWindowCapPct,
+		sessionAffinityTTL:         time.Hour,
+		sessionAffinitySubagents:   true,
+		sessionAffinityRebindOn:    coreauth.SessionAffinityRebindOnAny,
 	}
 	if cfg == nil {
 		return state
@@ -84,6 +86,9 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.strategy = "use-or-lose"
 	case "most-used", "mostused", "mu":
 		state.strategy = "most-used"
+	}
+	if state.strategy == "use-or-lose" {
+		state.useOrLoseShortWindowCapPct = cfg.Routing.UseOrLose.EffectiveShortWindowCapPct()
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
@@ -113,7 +118,7 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 	case "nearest-reset":
 		selector = &coreauth.NearestResetSelector{}
 	case "use-or-lose":
-		selector = &coreauth.UseOrLoseSelector{}
+		selector = &coreauth.UseOrLoseSelector{ShortWindowCapPct: state.useOrLoseShortWindowCapPct}
 	case "most-used":
 		selector = &coreauth.MostUsedSelector{}
 	default:

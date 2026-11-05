@@ -419,12 +419,14 @@ type RoutingConfig struct {
 	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first", "nearest-reset", "most-used", "use-or-lose".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
+	UseOrLose UseOrLoseConfig `yaml:"use-or-lose,omitempty" json:"use-or-lose,omitempty"`
+
 	// SessionAffinity enables universal session-sticky routing for all clients.
 	// Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
 	// followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
 	// execution or derived session identity, and the existing message-content hash fallback.
 	// Automatic failover is always enabled when bound auth becomes unavailable.
-	SessionAffinity bool `yaml:"session-affinity,omitempty" json:"session-affinity,omitempty"`
+	SessionAffinity bool `yaml:"session-affinity" json:"session-affinity"`
 
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
 	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m".

@@ -1025,6 +1025,9 @@ func (s *SessionAffinitySelector) shouldPreserveBindingWhenUnavailable(ctx conte
 	if s == nil || !s.rebindOnQuotaOnly || authID == "" {
 		return false
 	}
+	if _, useOrLose := s.fallback.(*UseOrLoseSelector); useOrLose {
+		return false
+	}
 	if ctx != nil {
 		if validated, _ := ctx.Value(prevalidatedAuthCandidatesKey{}).(bool); validated {
 			transientAuthIDs := sessionAffinityTransientAuthIDsFromContext(ctx)
@@ -1099,7 +1102,7 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
 func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	auths = filterCredentialCandidates(ctx, auths)
-	if _, useOrLose := s.fallback.(*UseOrLoseSelector); useOrLose {
+	if useOrLose, ok := s.fallback.(*UseOrLoseSelector); ok {
 		now := time.Now()
 		var err error
 		auths, err = getSelectorAvailableAuthsAcrossPriorities(ctx, auths, provider, model, now)
@@ -1109,7 +1112,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		samples := make(map[*Auth]useOrLoseSample, len(auths))
 		for _, auth := range auths {
 			if auth != nil {
-				samples[auth] = useOrLoseSampleFor(auth, model, now)
+				samples[auth] = useOrLose.sampleFor(auth, model, now)
 			}
 		}
 		auths = preferUseOrLoseRoom(auths, samples)
@@ -1216,7 +1219,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
-			if auth.ID == cachedAuthID {
+			if auth.ID == cachedAuthID && s.canRetainBinding(auth, model, now) {
 				bind(auth.ID, true)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 				return auth, nil
@@ -1254,7 +1257,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 		if parentAuthID := s.cache.latestSessionAuth(fallbackID, providers); parentAuthID != "" {
 			for _, auth := range available {
-				if auth.ID == parentAuthID {
+				if auth.ID == parentAuthID && s.canRetainBinding(auth, model, now) {
 					bind(auth.ID, true)
 					entry.Infof("session-affinity: guardian inherited parent binding | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 					return auth, nil
@@ -1266,7 +1269,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if fallbackKey != "" {
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
 			for _, auth := range available {
-				if auth.ID == cachedAuthID {
+				if auth.ID == cachedAuthID && s.canRetainBinding(auth, model, now) {
 					if !isSubagent || s.subagentAffinity {
 						bind(auth.ID, true)
 						if isFork {
@@ -1345,7 +1348,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	var preservedAuthID string
 	if match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength); ok {
 		for _, auth := range available {
-			if auth == nil || auth.ID != match.AuthID {
+			if auth == nil || auth.ID != match.AuthID || !s.canRetainBinding(auth, model, now) {
 				continue
 			}
 			if match.SessionID != "" {

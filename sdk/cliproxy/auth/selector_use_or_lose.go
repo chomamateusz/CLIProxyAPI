@@ -6,12 +6,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 const useOrLoseProbeInterval = time.Minute
 
 type UseOrLoseSelector struct {
+	ShortWindowCapPct float64
+
 	mu         sync.Mutex
 	probes     map[useOrLoseProbeKey]useOrLoseProbe
 	lastPruned time.Time
@@ -59,7 +62,7 @@ func (s *UseOrLoseSelector) pick(ctx context.Context, provider, model string, au
 	}
 	samples := make(map[*Auth]useOrLoseSample, len(available))
 	for _, auth := range available {
-		samples[auth] = useOrLoseSampleFor(auth, model, now)
+		samples[auth] = s.sampleFor(auth, model, now)
 	}
 	ordered := make([]*Auth, 0, len(available))
 	for _, auth := range auths {
@@ -96,7 +99,7 @@ func (s *UseOrLoseSelector) pick(ctx context.Context, provider, model string, au
 	return s.probeUnsampled(model, ordered, samples, selected, now), nil
 }
 
-func useOrLoseSampleFor(auth *Auth, model string, now time.Time) useOrLoseSample {
+func (s *UseOrLoseSelector) sampleFor(auth *Auth, model string, now time.Time) useOrLoseSample {
 	observations := quotaObservations(auth)
 	var weekly, short useOrLoseWindow
 	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
@@ -133,10 +136,11 @@ func useOrLoseSampleFor(auth *Auth, model string, now time.Time) useOrLoseSample
 		}
 	}
 	shortActive := short.reset.After(now) || short.reset.IsZero() && short.observed.Add(5*time.Hour).After(now)
+	capPct := (config.UseOrLoseConfig{ShortWindowCapPct: s.ShortWindowCapPct}).EffectiveShortWindowCapPct()
 	return useOrLoseSample{
 		window:  weekly,
 		sampled: weekly.usable(now),
-		capped:  short.hasUsage && short.utilisation >= 0.95 && shortActive,
+		capped:  short.hasUsage && short.utilisation >= capPct/100 && shortActive,
 		atLimit: weekly.reset.After(now) && (weekly.hasUsage && weekly.utilisation >= 1 || weekly.rejected),
 	}
 }
@@ -209,4 +213,12 @@ func (s *UseOrLoseSelector) probeUnsampled(model string, auths []*Auth, samples 
 		s.lastPruned = now
 	}
 	return selected
+}
+
+func (s *SessionAffinitySelector) canRetainBinding(auth *Auth, model string, now time.Time) bool {
+	if selector, ok := s.fallback.(*UseOrLoseSelector); ok {
+		sample := selector.sampleFor(auth, model, now)
+		return !sample.capped && !sample.atLimit
+	}
+	return true
 }

@@ -46,3 +46,20 @@ func TestQuotaRoutingSelectors(t *testing.T) {
 		})
 	}
 }
+
+func TestUseOrLoseRoutingThreshold(t *testing.T) {
+	t.Parallel()
+	cfg := &internalconfig.Config{Routing: internalconfig.RoutingConfig{Strategy: "use-or-lose"}}
+	initial := normalizedRoutingRuntimeState(cfg)
+	if got := newRoutingSelector(initial).(*coreauth.UseOrLoseSelector).ShortWindowCapPct; got != 95 {
+		t.Fatalf("default threshold = %g; want 95", got)
+	}
+	cfg.Routing.UseOrLose.ShortWindowCapPct = 80.5
+	updated := normalizedRoutingRuntimeState(cfg)
+	if initial == updated {
+		t.Fatal("threshold update did not change runtime state")
+	}
+	if got := newRoutingSelector(updated).(*coreauth.UseOrLoseSelector).ShortWindowCapPct; got != 80.5 {
+		t.Fatalf("updated threshold = %g; want 80.5", got)
+	}
+}

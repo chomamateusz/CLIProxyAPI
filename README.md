@@ -221,22 +221,24 @@ Both read the rate-limit headers the proxy already records per credential (`x-co
 
 ### Use-or-lose routing
 
-To drain weekly capacity before it expires, select:
+To drain weekly capacity before it expires while retaining per-account prompt caches, use the recommended configuration:
 
 ```yaml
 routing:
   strategy: use-or-lose
-  session-affinity: false
+  session-affinity: true
+  use-or-lose:
+    short-window-cap-pct: 95
 ```
 
-The config watcher applies this without a restart. Roll back the routing policy by setting `routing.strategy` to `nearest-reset` (restore the previous session-affinity setting if changed). The other strategies retain their existing behaviour.
+For `use-or-lose`, omitted `session-affinity` defaults to `true`; explicit `false` opts into per-request ranking. Other strategies keep their existing defaults. The config watcher applies this without a restart. Roll back the routing policy by setting `routing.strategy` to `nearest-reset` (restore the previous session-affinity setting if changed). The other strategies retain their existing behaviour.
 
 - Rank by the all-model weekly reset, or the Fable weekly reset for Fable requests when a usable Fable weekly reading exists (utilisation present, reset still in the future and observation less than seven days old). Otherwise, use the all-model weekly window. A Fable weekly window can come from an earlier Fable response even if the newest response is for Opus. Codex uses its primary or secondary seven-day window, not its five-hour reset.
-- A five-hour reading of at least 95%, or a binding weekly window at 100% or with status `rejected`, ranks behind every eligible credential with room in both windows. Each limit is ignored after its reset. If no eligible credential has room, all remain selectable; quota headers alone never exclude a credential or trigger an extra upstream call.
+- A five-hour reading at or above `routing.use-or-lose.short-window-cap-pct` (default 95; valid range greater than 0 through 100; omitted or invalid values use 95), or a binding weekly window at 100% or with status `rejected`, ranks behind every eligible credential with room in both windows. Each limit is ignored after its reset. If no eligible credential has room, all remain selectable; quota headers alone never exclude a credential or trigger an extra upstream call.
 - Among resets within one hour of the earliest reset, prefer lower utilisation; equal utilisation prefers the earlier reset, then existing input order. Anchoring the tie group to the earliest reset avoids inconsistent pairwise comparisons across three or more accounts.
 - Disabled credentials, model exclusions, per-key credential policies and backend cooldowns retain their existing eligibility rules. Existing credential priorities and Codex websocket preference apply within the capacity tier.
 - Missing, invalid or expired weekly samples start behind valid samples. After one minute in the eligible ranking pool, each unsampled Claude or Codex credential gets a normal request as a probe, including on mixed-provider request paths, oldest due first, at most once per minute per credential and model family (Fable versus other models). With N due credentials and continuing traffic, all get an attempt within the next N selections. No traffic means no probe; a response without quota headers cannot create a sample. Unsupported providers keep fill-first order.
-- Session affinity, if explicitly enabled, still retains healthy bindings and applies weekly ranking/probes only when invoking the fallback selector. Keep it disabled for per-request weekly ranking and the bounded sampling guarantee. A five-hour cap or binding weekly limit can rebind an existing session.
+- Session affinity retains a healthy bound credential even when another credential has an earlier weekly reset. A five-hour cap, binding weekly limit, model exclusion or cooldown triggers normal use-or-lose ranking and rebinds the session to the selected credential, including with `session-affinity-rebind-on: quota`. Once the original credential recovers, the session stays on its current healthy credential; it can move back only at a natural boundary (a new or expired session binding, or another required re-rank). Weekly ranking and unsampled probes run only at these selection boundaries, not on healthy affinity hits; the bounded probe guarantee applies to fallback selections, not every request.
 
 ### Key-issuer credentials
 
