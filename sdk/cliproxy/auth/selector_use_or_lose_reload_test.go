@@ -30,8 +30,10 @@ func TestUseOrLoseTransientRetryLCPAndNetwork(t *testing.T) {
 					f.manager.MarkResult(context.Background(), Result{AuthID: bound.ID, Provider: "claude", Model: f.model, Options: f.opts, Error: &Error{HTTPStatus: status, Message: "transient upstream failure"}})
 					fleetRequirePick(t, f, path, f.opts, map[string]struct{}{bound.ID: {}}, other.ID, "retry uses another credential")
 					f.manager.MarkResult(context.Background(), Result{AuthID: other.ID, Provider: "claude", Model: f.model, Options: f.opts, Success: true})
+					fleetRequirePick(t, f, path, f.opts, nil, other.ID, "a second request during transient cooldown still fails over")
+					f.manager.MarkResult(context.Background(), Result{AuthID: other.ID, Provider: "claude", Model: f.model, Options: f.opts, Success: true})
 					f.expireCooldown(bound.ID)
-					fleetRequirePick(t, f, path, f.opts, nil, bound.ID, "retry success preserves the original binding")
+					fleetRequirePick(t, f, path, f.opts, nil, bound.ID, "a third request after cooldown returns to the original binding")
 				})
 			}
 		}

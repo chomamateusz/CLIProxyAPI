@@ -188,13 +188,23 @@ func useOrLoseClaudeWindow(observations []QuotaState, name string) (useOrLoseWin
 
 func preferUseOrLoseRoom(auths []*Auth, samples map[*Auth]useOrLoseSample) []*Auth {
 	room := make([]*Auth, 0, len(auths))
+	cappedOnly := make([]*Auth, 0, len(auths))
 	for _, auth := range auths {
-		if sample := samples[auth]; !sample.capped && !sample.atLimit {
+		sample := samples[auth]
+		if sample.atLimit {
+			continue
+		}
+		if sample.capped {
+			cappedOnly = append(cappedOnly, auth)
+		} else {
 			room = append(room, auth)
 		}
 	}
 	if len(room) != 0 {
 		return room
+	}
+	if len(cappedOnly) != 0 {
+		return cappedOnly
 	}
 	return auths
 }

@@ -324,15 +324,67 @@ func TestFleetManagerAffinityTransitions(t *testing.T) {
 	}
 }
 
+func TestFleetManagerAffinityCappedBeforeWeeklyLimit(t *testing.T) {
+	for _, path := range []string{"claude", "mixed"} {
+		for _, model := range []string{fleetFable, fleetOther} {
+			for _, existing := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/existing=%t", path, model, existing), func(t *testing.T) {
+					f := newFleetManager(t, []string{"claude"}, model, true, SessionAffinityRebindOnQuota)
+					var bound, other *Auth
+					for _, auth := range f.auths {
+						switch auth.Metadata["email"] {
+						case fleetAccounts[0].email:
+							bound = auth
+						case fleetAccounts[1].email:
+							other = auth
+						default:
+							auth.Disabled = true
+							f.update(t, auth)
+						}
+					}
+					now := time.Now()
+					for _, name := range []string{"7d", "7d_oi"} {
+						useOrLoseTestWindow(bound, name, now.Add(24*time.Hour), .2)
+						useOrLoseTestWindow(other, name, now.Add(48*time.Hour), .2)
+					}
+					f.update(t, bound)
+					f.update(t, other)
+					if existing {
+						fleetRequirePick(t, f, path, f.opts, nil, bound.ID, "initial weekly-earliest binding")
+					}
+					for _, name := range []string{"7d", "7d_oi"} {
+						useOrLoseTestWindow(bound, name, now.Add(24*time.Hour), 1)
+						bound.Quota.Signals["Anthropic-Ratelimit-Unified-"+name+"-Status"] = "rejected"
+					}
+					useOrLoseTestWindow(other, "5h", now.Add(time.Hour), .96)
+					f.update(t, bound)
+					f.update(t, other)
+					fleetRequirePick(t, f, path, f.opts, nil, other.ID, "capped amazing outranks weekly-rejected devp-one")
+					fleetRequirePick(t, f, path, f.opts, nil, other.ID, "affinity remains in the best available capacity tier")
+				})
+			}
+		}
+	}
+}
+
 func TestFleetManagerAffinityTransientRetryDoesNotRebind(t *testing.T) {
 	withQuotaCooldownEnabled(t)
+	previousTransient := transientErrorCooldownSeconds.Swap(0)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(previousTransient) })
 	for _, rebind := range []string{"", SessionAffinityRebindOnQuota} {
 		for _, path := range []string{"claude", "mixed"} {
 			t.Run(fmt.Sprintf("rebind=%s/%s", rebind, path), func(t *testing.T) {
 				f := newFleetManager(t, []string{"claude"}, fleetOther, true, rebind)
 				bound, other := f.auths[0], f.auths[1]
 				fleetRequirePick(t, f, path, f.opts, nil, bound.ID, "initial healthy binding")
+				failedAt := time.Now()
 				f.manager.MarkResult(context.Background(), Result{AuthID: bound.ID, Provider: "claude", Model: f.model, Options: f.opts, Error: &Error{HTTPStatus: 503, Message: "transient upstream failure"}})
+				f.manager.mu.RLock()
+				deadline := f.manager.auths[bound.ID].ModelStates[f.model].NextRetryAfter
+				f.manager.mu.RUnlock()
+				if deadline.Before(failedAt.Add(time.Minute)) || deadline.After(time.Now().Add(time.Minute)) {
+					t.Fatalf("transient cooldown deadline = %s; want one minute after the failure", deadline)
+				}
 				got, err := f.pick(path, f.opts, map[string]struct{}{bound.ID: {}})
 				if err != nil || got == nil {
 					t.Fatalf("transient request must fail over: %v", err)
@@ -341,8 +393,10 @@ func TestFleetManagerAffinityTransientRetryDoesNotRebind(t *testing.T) {
 					t.Fatalf("retry got %s; want %s", got.ID, other.ID)
 				}
 				f.manager.MarkResult(context.Background(), Result{AuthID: got.ID, Provider: "claude", Model: f.model, Options: f.opts, Success: true})
+				fleetRequirePick(t, f, path, f.opts, nil, other.ID, "the next request during the one-minute cooldown still fails over")
+				f.manager.MarkResult(context.Background(), Result{AuthID: other.ID, Provider: "claude", Model: f.model, Options: f.opts, Success: true})
 				f.expireCooldown(bound.ID)
-				fleetRequirePick(t, f, path, f.opts, nil, bound.ID, "a successful transient 5xx retry is not a permanent session migration")
+				fleetRequirePick(t, f, path, f.opts, nil, bound.ID, "the third request returns to the original binding after cooldown expiry")
 			})
 		}
 	}
@@ -391,20 +445,22 @@ func TestFleetManagerAffinityAllCappedDoesNotFlipFlop(t *testing.T) {
 				useOrLoseTestWindow(a, window, reset, 1)
 				f.update(t, a)
 			}
-			want := f.auths[0].ID
+			var capped []*Auth
+			for _, auth := range f.auths {
+				if auth.Metadata["email"] != "one+claude@devp.it" {
+					capped = append(capped, auth)
+				}
+			}
+			want := capped[0].ID
 			for request := range 20 {
-				fleetRequirePick(t, f, path, f.opts, nil, want, "all-capped fallback remains deterministic across repeated requests")
-				a := f.auths[1].Clone()
+				fleetRequirePick(t, f, path, f.opts, nil, want, "the best capped-only binding remains stable ahead of weekly-limited credentials")
+				a := capped[1].Clone()
 				reset := f.selector.sampleFor(a, fleetOther, time.Now()).window.reset
 				if request%2 == 0 {
 					reset = time.Now().Add(time.Hour)
 				}
-				if a.Metadata["email"] == "one+claude@devp.it" {
-					useOrLoseTestWindow(a, "7d", reset, 1)
-				} else {
-					useOrLoseTestWindow(a, "7d", reset, .1)
-					useOrLoseTestWindow(a, "5h", time.Now().Add(time.Hour), 1)
-				}
+				useOrLoseTestWindow(a, "7d", reset, .1)
+				useOrLoseTestWindow(a, "5h", time.Now().Add(time.Hour), 1)
 				f.update(t, a)
 			}
 		})

@@ -734,7 +734,10 @@ func (m *Manager) transientlyUnavailableSessionAffinityAuthIDs(selector Selector
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
 		if useOrLose, ok := affinity.fallback.(*UseOrLoseSelector); ok {
 			if _, retried := tried[candidate.ID]; !retried {
-				continue
+				blocked, _, retryAt := isAuthBlockedForModel(candidate, checkModel, now)
+				if !blocked || !retryAt.After(now) {
+					continue
+				}
 			}
 			sample := useOrLose.sampleFor(candidate, checkModel, now)
 			if sample.capped || sample.atLimit {

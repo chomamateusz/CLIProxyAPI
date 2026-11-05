@@ -85,18 +85,30 @@ func fleetClaudeAuths(at time.Time, thirdShort bool) []*Auth {
 
 func fleetWant(auths []*Auth, model string, now time.Time, cap float64) (string, string) {
 	room := make([]*Auth, 0, len(auths))
+	cappedOnly := make([]*Auth, 0, len(auths))
 	for _, auth := range auths {
 		weekly, _ := useOrLoseClaudeWindow([]QuotaState{auth.Quota}, "7d")
 		fable, _ := useOrLoseClaudeWindow([]QuotaState{auth.Quota}, "7d_oi")
 		short, _ := useOrLoseClaudeWindow([]QuotaState{auth.Quota}, "5h")
-		if weekly.utilisation < 1 && (!strings.Contains(model, "fable") || !fable.usable(now) || fable.utilisation < 1) && (!short.hasUsage || !short.reset.After(now) || short.utilisation < cap) {
+		weeklyLimited := weekly.reset.After(now) && (weekly.utilisation >= 1 || weekly.rejected)
+		fableLimited := strings.Contains(model, "fable") && fable.usable(now) && (fable.utilisation >= 1 || fable.rejected)
+		if weeklyLimited || fableLimited {
+			continue
+		}
+		if short.hasUsage && short.reset.After(now) && short.utilisation >= cap {
+			cappedOnly = append(cappedOnly, auth)
+		} else {
 			room = append(room, auth)
 		}
 	}
-	reason := "earliest Warsaw weekly reset among credentials with all applicable bars below their limits"
+	reason := "earliest Warsaw weekly reset among credentials with room in all applicable windows"
+	if len(room) == 0 {
+		room = cappedOnly
+		reason = "five-hour capped credentials with weekly capacity precede weekly-limited credentials"
+	}
 	if len(room) == 0 {
 		room = auths
-		reason = "all credentials constrained; deterministic earliest-week fallback rather than exclusion"
+		reason = "all credentials weekly-limited; deterministic earliest-week fallback rather than exclusion"
 	}
 	best := room[0]
 	for _, candidate := range room[1:] {
@@ -234,6 +246,32 @@ func TestFleetUseOrLoseRealNightRegression(t *testing.T) {
 					t.Fatalf("got %s, %v; want %s: rejected devp-one is not spare capacity; amazing has room only below 95%%", fleetPickedID(got), err, want)
 				}
 			})
+		}
+	}
+}
+
+func TestFleetUseOrLoseRealNightTwoAccounts(t *testing.T) {
+	for _, at := range []string{"2026-11-04 23:00", "2026-11-05 00:00", "2026-11-05 03:00"} {
+		for _, model := range []string{fleetFable, fleetOther} {
+			for _, used := range []float64{.94, .95, .96, 1} {
+				t.Run(fmt.Sprintf("%s/%s/amazing-5h=%g", at, model, used), func(t *testing.T) {
+					now := fleetTime(t, at)
+					auths := fleetClaudeAuths(now, false)[:2]
+					for _, name := range []string{"7d", "7d_oi"} {
+						useOrLoseTestWindow(auths[0], name, fleetReset(fleetAccounts[0], now), 1)
+						auths[0].Quota.Signals["Anthropic-Ratelimit-Unified-"+name+"-Status"] = "rejected"
+					}
+					useOrLoseTestWindow(auths[1], "5h", now.Add(time.Hour), used)
+					want, reason := fleetWant(auths, model, now, .95)
+					if want != "amazing" {
+						t.Fatalf("oracle = %s; want amazing: %s", want, reason)
+					}
+					got, err := (&UseOrLoseSelector{}).pick(context.Background(), "claude", model, auths, now)
+					if err != nil || got == nil || got.ID != want {
+						t.Fatalf("got %s, %v; want amazing: a five-hour cap must not prefer a rejected weekly account", fleetPickedID(got), err)
+					}
+				})
+			}
 		}
 	}
 }
