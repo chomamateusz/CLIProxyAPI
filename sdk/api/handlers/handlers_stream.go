@@ -379,7 +379,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
-		errMsg := executionErrorMessage(err)
+		errMsg := h.executionErrorMessage(ctx, providers, req, opts, err)
 		lifecycle.completeError(ctx, errMsg)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
@@ -574,7 +574,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			break
 		}
 		if bootstrapRetries >= maxBootstrapRetries || !bootstrapEligible(bootstrapStreamErr) {
-			bootstrapErr = executionErrorMessage(bootstrapStreamErr)
+			bootstrapErr = h.executionErrorMessage(ctx, providers, req, opts, bootstrapStreamErr)
 			break
 		}
 		bootstrapRetries++
@@ -584,7 +584,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			if isAuthSelectionUnavailable(retryErr) && originalBootstrapErr.StatusCode >= http.StatusInternalServerError {
 				bootstrapErr = originalBootstrapErr
 			} else {
-				bootstrapErr = executionErrorMessage(enrichAuthSelectionError(retryErr, providers, normalizedModel))
+				bootstrapErr = h.executionErrorMessage(ctx, providers, req, opts, enrichAuthSelectionError(retryErr, providers, normalizedModel))
 			}
 			break
 		}

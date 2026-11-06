@@ -1,10 +1,6 @@
 package api
 
 import (
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"net/http"
 	"sort"
 	"strings"
@@ -12,7 +8,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -93,14 +88,6 @@ type fleetLimitsSummaryBar struct {
 
 var fleetLimitsNow = time.Now
 
-// Without a management secret the label key is random per process, so labels
-// stay opaque but change on restart.
-var fleetLimitsProcessLabelKey = func() []byte {
-	key := make([]byte, sha256.Size)
-	_, _ = rand.Read(key)
-	return key
-}()
-
 func (s *Server) fleetLimits(c *gin.Context) {
 	// AuthMiddleware lets every request through when no client keys are
 	// configured; this route must still never answer anonymously.
@@ -132,7 +119,7 @@ func (s *Server) fleetLimits(c *gin.Context) {
 		response.Client.Name = optionalString(strings.TrimSpace(policy.Name))
 	}
 
-	labelKey := fleetLimitsLabelKey(cfg)
+	labelKey := coreauth.FleetLimitsLabelKey(cfg)
 	visibleProviders := make(map[string]bool)
 	for _, auth := range auths {
 		if auth == nil || policy != nil && !policy.AllowsCredential(auth.FileName, auth.ID, auth.Label) {
@@ -204,7 +191,7 @@ func fleetLimitsModels(policy *access.KeyPolicy) []fleetLimitsModel {
 func fleetLimitsCredentialFor(auth *coreauth.Auth, policy *access.KeyPolicy, labelKey []byte, now time.Time) fleetLimitsCredential {
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	credential := fleetLimitsCredential{
-		Label:     fleetLimitsLabel(labelKey, provider, auth.ID),
+		Label:     coreauth.FleetLimitsLabel(labelKey, provider, auth.ID),
 		Provider:  provider,
 		State:     "active",
 		Bars:      make([]fleetLimitsBar, 0),
@@ -287,25 +274,6 @@ func addFleetLimitsSummary(summary map[string]fleetLimitsProviderSummary, creden
 		}
 	}
 	summary[credential.Provider] = providerSummary
-}
-
-func fleetLimitsLabelKey(cfg *config.Config) []byte {
-	if cfg != nil {
-		if secret := strings.TrimSpace(cfg.RemoteManagement.SecretKey); secret != "" {
-			sum := sha256.Sum256([]byte("fleet-limits-label\x00" + secret))
-			return sum[:]
-		}
-	}
-	return fleetLimitsProcessLabelKey
-}
-
-func fleetLimitsLabel(key []byte, provider, authID string) string {
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write([]byte(provider + "\x00" + authID))
-	if provider == "" {
-		provider = "unknown"
-	}
-	return provider + "-" + hex.EncodeToString(mac.Sum(nil))[:8]
 }
 
 func optionalString(value string) *string {

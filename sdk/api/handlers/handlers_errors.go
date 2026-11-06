@@ -6,13 +6,33 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"golang.org/x/net/context"
 )
+
+func (h *BaseAPIHandler) executionErrorMessage(ctx context.Context, providers []string, req coreexecutor.Request, opts coreexecutor.Options, err error) *interfaces.ErrorMessage {
+	msg := executionErrorMessage(err)
+	if msg.StatusCode != http.StatusTooManyRequests {
+		return msg
+	}
+	synthesized := h.AuthManager.ClaudeRateLimitHeaders(ctx, providers, req.Model, opts, err, time.Now())
+	if len(synthesized) == 0 {
+		return msg
+	}
+	if msg.Headers == nil {
+		msg.Headers = make(http.Header)
+	}
+	for key, values := range synthesized {
+		msg.Headers[key] = values
+	}
+	return msg
+}
 
 func statusFromError(err error) int {
 	return clienterror.HTTPStatusFromError(err)
@@ -123,22 +143,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 		writeDirectErrorResponse(c, status, msg)
 		return
 	}
-	if msg != nil && msg.Error != nil {
-		for _, value := range coreauth.SafeResponseHeaders(msg.Error).Values("Retry-After") {
-			c.Writer.Header().Add("Retry-After", value)
-		}
-	}
-	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.CurrentConfig()) {
-		for key, values := range msg.Addon {
-			if len(values) == 0 || IsCPAReservedResponseHeader(key) {
-				continue
-			}
-			c.Writer.Header().Del(key)
-			for _, value := range values {
-				c.Writer.Header().Add(key, value)
-			}
-		}
-	}
+	h.WriteErrorResponseHeaders(c, msg)
 
 	errText := http.StatusText(status)
 	if msg != nil && msg.Error != nil {
@@ -206,6 +211,37 @@ func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *inter
 			} else {
 				// Create new response data entry
 				ginContext.Set("API_RESPONSE_ERROR", []*interfaces.ErrorMessage{err})
+			}
+		}
+	}
+}
+
+func (h *BaseAPIHandler) WriteErrorResponseHeaders(c *gin.Context, msg *interfaces.ErrorMessage) {
+	if msg != nil && msg.Error != nil {
+		for _, value := range coreauth.SafeResponseHeaders(msg.Error).Values("Retry-After") {
+			c.Writer.Header().Add("Retry-After", value)
+		}
+	}
+	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.CurrentConfig()) {
+		for key, values := range msg.Addon {
+			if len(values) == 0 || IsCPAReservedResponseHeader(key) {
+				continue
+			}
+			c.Writer.Header().Del(key)
+			for _, value := range values {
+				c.Writer.Header().Add(key, value)
+			}
+		}
+	}
+
+	if msg != nil {
+		for key, values := range FilterUpstreamHeaders(msg.Headers) {
+			if len(values) == 0 || IsCPAReservedResponseHeader(key) {
+				continue
+			}
+			c.Writer.Header().Del(key)
+			for _, value := range values {
+				c.Writer.Header().Add(key, value)
 			}
 		}
 	}

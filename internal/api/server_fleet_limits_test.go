@@ -386,7 +386,7 @@ func TestFleetLimitsHidesCooldownsOfExcludedModels(t *testing.T) {
 
 	ultra, _ := manager.GetByID("claude-" + fleetUltraEmail + ".json")
 	policy := &sdkaccess.KeyPolicy{ExcludedModels: []string{"claude-fable-*"}}
-	credential := fleetLimitsCredentialFor(ultra, policy, fleetLimitsProcessLabelKey, fleetNow)
+	credential := fleetLimitsCredentialFor(ultra, policy, coreauth.FleetLimitsLabelKey(nil), fleetNow)
 	if len(credential.Cooldowns) != 1 || credential.Cooldowns[0].Scope != "credential" || credential.State != "cooldown" {
 		t.Fatalf("ultra cooldowns under m1 policy = %+v (state %s)", credential.Cooldowns, credential.State)
 	}
@@ -409,7 +409,7 @@ func TestFleetLimitsSummarySessionWithoutWindow(t *testing.T) {
 	summarise := func(auths ...*coreauth.Auth) map[string]fleetLimitsSummaryBar {
 		summary := make(map[string]fleetLimitsProviderSummary)
 		for _, auth := range auths {
-			addFleetLimitsSummary(summary, fleetLimitsCredentialFor(auth, nil, fleetLimitsProcessLabelKey, fleetNow))
+			addFleetLimitsSummary(summary, fleetLimitsCredentialFor(auth, nil, coreauth.FleetLimitsLabelKey(nil), fleetNow))
 		}
 		return summary["claude"].Bars
 	}

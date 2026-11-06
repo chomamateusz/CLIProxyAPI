@@ -1251,3 +1251,28 @@ func TestExecuteModelAllowsImageModel_Issue6196(t *testing.T) {
 		t.Fatalf("captured stream request path = %v, want /v1/images/edits", gotPath)
 	}
 }
+
+func TestModelExecutionStreamErrorMergesSynthesizedHeaders(t *testing.T) {
+	for _, addon := range []http.Header{nil, {"Retry-After": {"900"}, "X-Upstream": {"retained"}}} {
+		msg := &interfaces.ErrorMessage{StatusCode: http.StatusTooManyRequests, Addon: addon, Headers: http.Header{
+			"Retry-After": {"60"}, "Anthropic-Ratelimit-Unified-Reset": {"1793974200"},
+			"Set-Cookie": {"private=value"}, "Connection": {"X-Internal"}, "X-Internal": {"private"},
+			"Content-Length": {"99"}, "Transfer-Encoding": {"chunked"},
+			"Access-Control-Allow-Origin": {"*"}, "X-Cpa-Trace-Id": {"upstream"}, "X-Litellm-Test": {"gateway"},
+			"X-Upstream": {},
+		}}
+		got := modelExecutionStreamErrorFromMessage(msg)
+		if got.Headers.Get("Retry-After") != "60" || got.Headers.Get("Anthropic-Ratelimit-Unified-Reset") != "1793974200" || got.Headers.Get("X-Upstream") != addon.Get("X-Upstream") {
+			t.Fatalf("headers=%v", got.Headers)
+		}
+		for _, key := range []string{"Set-Cookie", "Connection", "X-Internal", "Content-Length", "Transfer-Encoding", "Access-Control-Allow-Origin", "X-Cpa-Trace-Id", "X-Litellm-Test"} {
+			if _, exists := got.Headers[key]; exists {
+				t.Fatalf("unfiltered %s: %v", key, got.Headers)
+			}
+		}
+		got.Headers["Retry-After"][0] = "changed"
+		if msg.Headers.Get("Retry-After") != "60" || addon != nil && addon.Get("Retry-After") != "900" {
+			t.Fatal("mutated source headers")
+		}
+	}
+}

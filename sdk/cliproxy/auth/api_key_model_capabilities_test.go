@@ -715,3 +715,24 @@ func TestCodexAPIKeyModelIsCompat(t *testing.T) {
 		t.Fatal("nil config IsCompat = true, want false")
 	}
 }
+
+func TestUnrotatedExecutionModelCandidatesPreservesPoolRotation(t *testing.T) {
+	manager := newOpenAICompatPoolTestManager(t, "public-model", []internalconfig.OpenAICompatibilityModel{
+		{Name: "upstream-a", Alias: "public-model"},
+		{Name: "upstream-b", Alias: "public-model"},
+	}, nil)
+	auth := manager.List()[0]
+	for round := range 4 {
+		for range 2 {
+			models, _, _, _ := manager.unrotatedExecutionModelCandidatesWithAlias(auth, "public-model")
+			if len(models) != 2 || models[0] != "upstream-a" || models[1] != "upstream-b" {
+				t.Fatalf("unrotated candidates=%v", models)
+			}
+		}
+		models, pooled, _, _ := manager.executionModelCandidatesWithAlias(auth, "public-model")
+		want := []string{"upstream-a", "upstream-b"}
+		if !pooled || len(models) != 2 || models[0] != want[round%2] || models[1] != want[(round+1)%2] {
+			t.Fatalf("round=%d candidates=%v pooled=%t", round, models, pooled)
+		}
+	}
+}

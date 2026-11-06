@@ -22,6 +22,7 @@ const (
 )
 
 type providerRefusal struct {
+	authID          string
 	provider        string
 	model           string
 	routeModel      string
@@ -144,6 +145,7 @@ func providerRefusalFromResult(ctx context.Context, result Result) *providerRefu
 		body = body[:maxProviderRefusalBodyBytes]
 	}
 	return &providerRefusal{
+		authID:          result.AuthID,
 		provider:        result.Provider,
 		model:           providerRefusalModelKey(result),
 		routeModel:      canonicalModelKey(result.RouteModel),

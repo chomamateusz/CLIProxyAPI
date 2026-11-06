@@ -651,10 +651,20 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 		return nil, errSet
 	}
 
-	if errMsg != nil && errMsg.Addon != nil {
+	if errMsg != nil {
+		merged := errMsg.Addon.Clone()
+		if merged == nil && len(errMsg.Headers) > 0 {
+			merged = make(http.Header)
+		}
+		for key, values := range handlers.FilterUpstreamHeaders(errMsg.Headers) {
+			if len(values) == 0 {
+				continue
+			}
+			merged[key] = values
+		}
 		headers := []byte(`{}`)
 		hasHeaders := false
-		for key, values := range errMsg.Addon {
+		for key, values := range merged {
 			if len(values) == 0 {
 				continue
 			}
