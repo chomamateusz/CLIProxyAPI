@@ -219,6 +219,10 @@ routing:
 
 Both read the rate-limit headers the proxy already records per credential (`x-codex-primary-*` for Codex, `anthropic-ratelimit-unified-5h-*` for Claude). Providers without such headers fall back to fill-first order.
 
+### Claude retry headers
+
+Claude 429 responses on the Anthropic and OpenAI-compatible routes carry the proxy's own availability in `anthropic-ratelimit-unified-status: rejected`, `anthropic-ratelimit-unified-reset` (epoch seconds), `anthropic-ratelimit-unified-representative-claim` and `Retry-After`. The reset is the earliest release among credentials eligible for the caller and model, after each credential's applicable cooldowns and rejected quota windows have all ended; the Fable weekly window does not block other models. These values override stale upstream headers for fresh refusals, refusals replayed inside the retry guard, and local cooldown errors, without changing provider response bodies. Eligibility includes the caller's policy for mapped execution models, even when the route is registered under multiple providers. With no known quota block, an eligible unblocked credential, or only a transient backoff on the first credential to recover, upstream headers remain untouched. A generic 429 cooldown is not evidence of a usage limit: synthesis requires a `credential_quota` cooldown or a stored unified window with status `rejected` that applies to the model. A representative claim alone is not evidence of rejection. Per-minute throttles retain their upstream headers and body. A stored representative claim is reused only for the credential that recovers first. The same filtered error headers are carried by Responses WebSocket error events and model-execution stream errors. Each synthesized set logs the same opaque credential label used by `/v1/fleet/limits`. This uses in-memory observations only, adds no configuration and leaves other providers unchanged.
+
 ### Key-issuer credentials
 
 `access.key-issuer-keys` entries (same shape as `api-keys`) may only list, create and revoke client keys; every other management endpoint answers `403`.

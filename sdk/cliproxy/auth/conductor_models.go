@@ -329,6 +329,16 @@ func (m *Manager) preparedExecutionModelsWithAlias(auth *Auth, routeModel string
 }
 
 func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
+	candidates, upstreamModel, aliasResult, routing := m.unrotatedExecutionModelCandidatesWithAlias(auth, routeModel)
+	pooled := len(candidates) > 1
+	if pooled {
+		offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, upstreamModel), len(candidates))
+		candidates = rotateStrings(candidates, offset)
+	}
+	return candidates, pooled, aliasResult, routing
+}
+
+func (m *Manager) unrotatedExecutionModelCandidatesWithAlias(auth *Auth, routeModel string) ([]string, string, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
 	routing := m.loadAPIKeyModelRouting()
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	aliasResult := m.resolveExecutionAliasResultForRequestedWithRouting(routing, auth, requestedModel)
@@ -345,12 +355,7 @@ func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel strin
 	}
 	if len(candidates) == 0 {
 		if pool := resolveOpenAICompatUpstreamModelPool(routing.config, auth, upstreamModel); len(pool) > 0 {
-			if len(pool) == 1 {
-				candidates = pool
-			} else {
-				offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, upstreamModel), len(pool))
-				candidates = rotateStrings(pool, offset)
-			}
+			candidates = pool
 		} else {
 			resolved := m.applyAPIKeyModelAliasWithRouting(routing, auth, upstreamModel)
 			if strings.TrimSpace(resolved) == "" {
@@ -359,8 +364,7 @@ func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel strin
 			candidates = []string{resolved}
 		}
 	}
-	pooled := len(candidates) > 1
-	return candidates, pooled, aliasResult, routing
+	return candidates, upstreamModel, aliasResult, routing
 }
 
 func (m *Manager) resolveExecutionAliasResult(auth *Auth, routeModel string) OAuthModelAliasResult {

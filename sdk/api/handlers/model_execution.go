@@ -373,10 +373,20 @@ func modelExecutionStreamErrorFromMessage(errMsg *interfaces.ErrorMessage) *Mode
 	if errMsg.Error != nil {
 		message = errMsg.Error.Error()
 	}
+	headers := cloneHeader(errMsg.Addon)
+	if headers == nil && len(errMsg.Headers) > 0 {
+		headers = make(http.Header)
+	}
+	for key, values := range FilterUpstreamHeaders(errMsg.Headers) {
+		if len(values) == 0 {
+			continue
+		}
+		headers[key] = append([]string(nil), values...)
+	}
 	return &ModelExecutionStreamError{
 		StatusCode: errMsg.StatusCode,
 		Message:    message,
-		Headers:    cloneHeader(errMsg.Addon),
+		Headers:    headers,
 	}
 }
 
