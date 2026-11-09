@@ -116,6 +116,11 @@ new_case() {
   ln -s "$TEST_REMOTE_HOME/cliproxyapi/old-version/cli-proxy-api" "$TEST_REMOTE_HOME/cliproxyapi/cli-proxy-api"
 }
 
+set_running() {
+  printf '%s\n' "$1" > "$TEST_REMOTE_HOME/cliproxyapi/old-version/COMMIT"
+  printf 'fake active binary\000vcs.revision=%s\n' "$1" > "$TEST_REMOTE_HOME/cliproxyapi/old-version/cli-proxy-api"
+}
+
 run_deploy() {
   if bash "$DEPLOY_SCRIPT" 127.0.0.1 "$BINARY" > "$CASE_ROOT/output" 2>&1; then
     STATUS=0
@@ -157,27 +162,41 @@ run_deploy
 expect_deployed
 
 new_case 'running equals new deploys'
-printf '%s\n' "$NEW" > "$TEST_REMOTE_HOME/cliproxyapi/old-version/COMMIT"
+set_running "$NEW"
 run_deploy
 expect_deployed
 
 new_case 'divergent running commit refuses and lists the dropped feature'
-printf '%s\n' "$DIVERGED" > "$TEST_REMOTE_HOME/cliproxyapi/old-version/COMMIT"
+set_running "$DIVERGED"
 run_deploy
 expect_refused
 expect_output "$NEW"
 expect_output "$DIVERGED"
 expect_output 'running-only feature must not disappear'
 
-new_case 'unknown running commit refuses even with an exact override'
-printf '%s\n' "$UNKNOWN" > "$TEST_REMOTE_HOME/cliproxyapi/old-version/COMMIT"
-export DEPLOY_ALLOW_DROPPING_RUNNING="$UNKNOWN"
+new_case 'unknown running commit refuses without an override'
+set_running "$UNKNOWN"
 run_deploy
 expect_refused
 expect_output "running commit $UNKNOWN is unknown"
+expect_output "set DEPLOY_ALLOW_DROPPING_RUNNING=$UNKNOWN"
 
-new_case 'COMMIT is preferred over a divergent embedded revision'
+new_case 'exact override permits a deploy over an unknown running commit'
+set_running "$UNKNOWN"
+export DEPLOY_ALLOW_DROPPING_RUNNING="$UNKNOWN"
+run_deploy
+expect_deployed
+expect_output "WARNING: DEPLOY_ALLOW_DROPPING_RUNNING=$UNKNOWN"
+
+new_case 'COMMIT disagreeing with the embedded revision refuses even with an override'
 printf 'vcs.revision=%s\n' "$DIVERGED" > "$TEST_REMOTE_HOME/cliproxyapi/old-version/cli-proxy-api"
+export DEPLOY_ALLOW_DROPPING_RUNNING="$BASE"
+run_deploy
+expect_refused
+expect_output "COMMIT file says $BASE but the active binary embeds $DIVERGED"
+
+new_case 'COMMIT alone identifies a binary without an embedded revision'
+printf 'no build metadata\n' > "$TEST_REMOTE_HOME/cliproxyapi/old-version/cli-proxy-api"
 run_deploy
 expect_deployed
 
@@ -195,15 +214,26 @@ expect_deployed
 new_case 'conflicting embedded revisions refuse'
 mv "$TEST_REMOTE_HOME/cliproxyapi/old-version/COMMIT" "$CASE_ROOT/saved-COMMIT"
 printf 'vcs.revision=%s\nvcs.revision=%s\n' "$BASE" "$DIVERGED" > "$TEST_REMOTE_HOME/cliproxyapi/old-version/cli-proxy-api"
+export DEPLOY_ALLOW_DROPPING_RUNNING="$BASE"
 run_deploy
 expect_refused
-expect_output 'cannot identify the running commit'
+expect_output 'conflicting vcs.revision values'
 
-new_case 'neither source refuses'
+new_case 'neither source refuses without an override'
 mv "$TEST_REMOTE_HOME/cliproxyapi/old-version/COMMIT" "$CASE_ROOT/saved-COMMIT"
 printf 'no build metadata\n' > "$TEST_REMOTE_HOME/cliproxyapi/old-version/cli-proxy-api"
 run_deploy
 expect_refused
+expect_output 'cannot be identified'
+expect_output 'set DEPLOY_ALLOW_DROPPING_RUNNING=unidentified'
+
+new_case 'override unidentified permits a deploy when neither source exists'
+mv "$TEST_REMOTE_HOME/cliproxyapi/old-version/COMMIT" "$CASE_ROOT/saved-COMMIT"
+printf 'no build metadata\n' > "$TEST_REMOTE_HOME/cliproxyapi/old-version/cli-proxy-api"
+export DEPLOY_ALLOW_DROPPING_RUNNING=unidentified
+run_deploy
+expect_deployed
+expect_output 'WARNING: DEPLOY_ALLOW_DROPPING_RUNNING=unidentified'
 
 new_case 'modified new binary refuses before SSH'
 printf '\tbuild\tvcs.revision=%s\n\tbuild\tvcs.modified=true\n' "$NEW" > "$TEST_BUILD_INFO"
@@ -244,7 +274,7 @@ expect_refused
 expect_output 'git is required'
 
 new_case 'exact override permits a divergent deploy with a warning'
-printf '%s\n' "$DIVERGED" > "$TEST_REMOTE_HOME/cliproxyapi/old-version/COMMIT"
+set_running "$DIVERGED"
 export DEPLOY_ALLOW_DROPPING_RUNNING="$DIVERGED"
 run_deploy
 expect_deployed
@@ -252,7 +282,7 @@ expect_output "WARNING: DEPLOY_ALLOW_DROPPING_RUNNING=$DIVERGED"
 expect_output 'running-only feature must not disappear'
 
 new_case 'wrong override refuses a divergent deploy'
-printf '%s\n' "$DIVERGED" > "$TEST_REMOTE_HOME/cliproxyapi/old-version/COMMIT"
+set_running "$DIVERGED"
 export DEPLOY_ALLOW_DROPPING_RUNNING="$BASE"
 run_deploy
 expect_refused
@@ -309,7 +339,7 @@ git -C "$TEST_ROOT/other-clone" add remote-feature
 git -C "$TEST_ROOT/other-clone" commit --quiet -m 'remote-only feature must not disappear'
 REMOTE_ONLY="$(git -C "$TEST_ROOT/other-clone" rev-parse HEAD)"
 git -C "$TEST_ROOT/other-clone" push --quiet origin main
-printf '%s\n' "$REMOTE_ONLY" > "$TEST_REMOTE_HOME/cliproxyapi/old-version/COMMIT"
+set_running "$REMOTE_ONLY"
 if git -C "$REPO" cat-file -e "$REMOTE_ONLY^{commit}" 2>/dev/null; then
   fail 'remote-only commit already exists locally'
 fi

@@ -24,27 +24,38 @@ if ! RUNNING_COMMIT="$(ssh "$HOST" bash -s <<'REMOTE'
 set -euo pipefail
 active="$(readlink -f "$HOME/cliproxyapi/cli-proxy-api")"
 commit_file="$(dirname "$active")/COMMIT"
+file_commit=""
 if [ -f "$commit_file" ]; then
-  commit="$(cat "$commit_file")"
-  if [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then
-    printf '%s\n' "$commit"
-    exit 0
+  candidate="$(cat "$commit_file")"
+  if [[ "$candidate" =~ ^[0-9a-f]{40}$ ]]; then
+    file_commit="$candidate"
   fi
 fi
+embedded_commit=""
 if revisions="$(LC_ALL=C grep -a -o 'vcs\.revision=[0-9a-f]\{40\}' "$active" | sort -u)"; then
-  commit="${revisions#vcs.revision=}"
-  if [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then
-    printf '%s\n' "$commit"
-    exit 0
+  candidate="${revisions#vcs.revision=}"
+  if [[ ! "$candidate" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "the active binary embeds conflicting vcs.revision values" >&2
+    exit 1
   fi
+  embedded_commit="$candidate"
 fi
-echo "cannot identify the running commit from COMMIT or the active binary" >&2
-exit 1
+if [ -n "$file_commit" ] && [ -n "$embedded_commit" ] && [ "$file_commit" != "$embedded_commit" ]; then
+  echo "COMMIT file says $file_commit but the active binary embeds $embedded_commit" >&2
+  exit 1
+fi
+if [ -n "$embedded_commit" ]; then
+  printf '%s\n' "$embedded_commit"
+elif [ -n "$file_commit" ]; then
+  printf '%s\n' "$file_commit"
+else
+  printf 'unidentified\n'
+fi
 REMOTE
 )"; then
   refuse "cannot read the running commit on $HOST"
 fi
-[[ "$RUNNING_COMMIT" =~ ^[0-9a-f]{40}$ ]] || refuse "the running commit must be exactly one 40-hex commit"
+[[ "$RUNNING_COMMIT" == unidentified || "$RUNNING_COMMIT" =~ ^[0-9a-f]{40}$ ]] || refuse "the running commit must be exactly one 40-hex commit"
 
 command -v git >/dev/null 2>&1 || refuse "git is required for the ancestry check"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,9 +64,14 @@ if ! REPO="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)"; then
   REPO="$(git -C "$CLIPROXY_REPO" rev-parse --show-toplevel 2>/dev/null)" || refuse "CLIPROXY_REPO is not a git repository"
 fi
 git -C "$REPO" fetch --quiet origin || refuse "git fetch origin failed in $REPO"
-git -C "$REPO" cat-file -e "$RUNNING_COMMIT^{commit}" 2>/dev/null || refuse "running commit $RUNNING_COMMIT is unknown in $REPO"
 git -C "$REPO" cat-file -e "$NEW_COMMIT^{commit}" 2>/dev/null || refuse "new commit $NEW_COMMIT is unknown in $REPO"
-if git -C "$REPO" merge-base --is-ancestor "$RUNNING_COMMIT" "$NEW_COMMIT"; then
+if [ "$RUNNING_COMMIT" = unidentified ]; then
+  RUNNING_IS_ANCESTOR=false
+  echo "the running commit cannot be identified from COMMIT or the active binary" >&2
+elif ! git -C "$REPO" cat-file -e "$RUNNING_COMMIT^{commit}" 2>/dev/null; then
+  RUNNING_IS_ANCESTOR=false
+  echo "running commit $RUNNING_COMMIT is unknown in $REPO" >&2
+elif git -C "$REPO" merge-base --is-ancestor "$RUNNING_COMMIT" "$NEW_COMMIT"; then
   RUNNING_IS_ANCESTOR=true
 else
   ancestry_status=$?
@@ -70,9 +86,9 @@ if [ "${DEPLOY_ALLOW_DROPPING_RUNNING+x}" = x ] && [ "$DEPLOY_ALLOW_DROPPING_RUN
 fi
 if [ "$RUNNING_IS_ANCESTOR" = false ]; then
   if [ "${DEPLOY_ALLOW_DROPPING_RUNNING:-}" != "$RUNNING_COMMIT" ]; then
-    refuse "set DEPLOY_ALLOW_DROPPING_RUNNING=$RUNNING_COMMIT only to deliberately drop these commits"
+    refuse "set DEPLOY_ALLOW_DROPPING_RUNNING=$RUNNING_COMMIT only to deploy over a running commit that is not verified as contained"
   fi
-  echo "WARNING: DEPLOY_ALLOW_DROPPING_RUNNING=$RUNNING_COMMIT; deploying $NEW_COMMIT and DROPPING running commits" >&2
+  echo "WARNING: DEPLOY_ALLOW_DROPPING_RUNNING=$RUNNING_COMMIT; deploying $NEW_COMMIT without proof that the running commit is contained" >&2
 fi
 
 ssh "$HOST" mkdir -p "$REMOTE_ROOT/$VERSION"
