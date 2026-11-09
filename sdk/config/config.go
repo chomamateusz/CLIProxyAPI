@@ -9,6 +9,7 @@ import internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 type SDKConfig = internalconfig.SDKConfig
 
 type Config = internalconfig.Config
+type UseOrLoseConfig = internalconfig.UseOrLoseConfig
 
 type ModelCatalogs = internalconfig.ModelCatalogs
 
@@ -44,7 +45,8 @@ type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
 type TLS = internalconfig.TLSConfig
 
 const (
-	DefaultPanelGitHubRepository = internalconfig.DefaultPanelGitHubRepository
+	DefaultPanelGitHubRepository      = internalconfig.DefaultPanelGitHubRepository
+	DefaultUseOrLoseShortWindowCapPct = internalconfig.DefaultUseOrLoseShortWindowCapPct
 )
 
 func LoadConfig(configFile string) (*Config, error) { return internalconfig.LoadConfig(configFile) }

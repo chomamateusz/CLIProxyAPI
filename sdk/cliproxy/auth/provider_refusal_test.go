@@ -173,6 +173,7 @@ func quotaSelectorsUnderTest() []struct {
 	}{
 		{"nearest-reset", func() Selector { return &NearestResetSelector{} }},
 		{"most-used", func() Selector { return &MostUsedSelector{} }},
+		{"use-or-lose", func() Selector { return &UseOrLoseSelector{} }},
 	}
 }
 

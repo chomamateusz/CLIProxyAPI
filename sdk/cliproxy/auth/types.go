@@ -114,8 +114,11 @@ type Auth struct {
 	// RejectedSIWCAccessToken tracks the nested SIWC access token rejected by upstream 401 until replaced.
 	RejectedSIWCAccessToken string `json:"-"`
 
-	Success int64 `json:"-"`
-	Failed  int64 `json:"-"`
+	sampledQuota  QuotaState
+	sampledFable  bool
+	lastRequestAt time.Time
+	Success       int64 `json:"-"`
+	Failed        int64 `json:"-"`
 
 	// cooldownRecordedSeq is the execution sequence watermark captured when
 	// the current auth-level cooldown was recorded. Successes from executions
@@ -405,6 +408,7 @@ func (a *Auth) recordRecentRequest(now time.Time, success bool) {
 	if a == nil {
 		return
 	}
+	a.lastRequestAt = now
 	bucketID := recentRequestBucketID(now)
 	idx := recentRequestBucketIndex(bucketID)
 	bucket := &a.recentRequests.buckets[idx]
@@ -451,6 +455,7 @@ func (a *Auth) Clone() *Auth {
 	}
 	copyAuth := *a
 	copyAuth.Quota = a.Quota.Clone()
+	copyAuth.sampledQuota = a.sampledQuota.Clone()
 	if a.Attributes != nil {
 		copyAuth.Attributes = make(map[string]string, len(a.Attributes))
 		for key, value := range a.Attributes {
