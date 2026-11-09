@@ -17,6 +17,8 @@ func TestNormalizeQuotaRoutingStrategy(t *testing.T) {
 		{"mostused", "most-used", true},
 		{"mu", "most-used", true},
 		{" MU ", "most-used", true},
+		{"use-or-lose", "use-or-lose", true},
+		{" USE-OR-LOSE ", "use-or-lose", true},
 		{"unknown", "", false},
 	} {
 		t.Run(tc.input, func(t *testing.T) {

@@ -159,7 +159,7 @@ access:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first, nearest-reset, most-used
+  strategy: "use-or-lose" # round-robin (default), weighted-round-robin, fill-first, nearest-reset, most-used, use-or-lose
   # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
   # Non-positive weights exclude the credential while this strategy is active.
   # For OAuth/file credentials, add a top-level numeric "weight" field to the auth JSON.
@@ -171,7 +171,9 @@ routing:
   # An established binding outranks credential priority: once a session is bound, that
   # credential is kept even if a higher-priority credential recovers. Credential priority
   # still decides cold bindings, requests without a session, and post-failover rebinding.
-  session-affinity: false # default: false
+  session-affinity: true # use-or-lose default: true; other strategies default: false
+  use-or-lose:
+    short-window-cap-pct: 95 # Percent (1 < value <= 100), not a fraction; invalid values use 95.
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
   # When true (default), subagents (child sessions with parent references) inherit and bind

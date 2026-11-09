@@ -323,6 +323,8 @@ func normalizeRoutingStrategy(strategy string) (string, bool) {
 		return "fill-first", true
 	case "nearest-reset", "nearestreset", "nr":
 		return "nearest-reset", true
+	case "use-or-lose":
+		return "use-or-lose", true
 	case "most-used", "mostused", "mu":
 		return "most-used", true
 	default:
@@ -354,6 +356,25 @@ func (h *Handler) PutRoutingStrategy(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if normalized == "use-or-lose" {
+		data, err := os.ReadFile(h.configFilePath)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read routing config: %v", err)})
+			return
+		}
+		var saved struct {
+			Routing struct {
+				SessionAffinity *bool `yaml:"session-affinity"`
+			} `yaml:"routing"`
+		}
+		if err = yaml.Unmarshal(data, &saved); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode routing config"})
+			return
+		}
+		if saved.Routing.SessionAffinity == nil {
+			h.cfg.Routing.SessionAffinity = true
+		}
+	}
 	h.cfg.Routing.Strategy = normalized
 	h.persistLocked(c)
 }

@@ -55,19 +55,21 @@ type configCommit struct {
 }
 
 type routingRuntimeState struct {
-	strategy                 string
-	sessionAffinity          bool
-	sessionAffinityTTL       time.Duration
-	sessionAffinitySubagents bool
-	sessionAffinityRebindOn  string
+	strategy                   string
+	useOrLoseShortWindowCapPct float64
+	sessionAffinity            bool
+	sessionAffinityTTL         time.Duration
+	sessionAffinitySubagents   bool
+	sessionAffinityRebindOn    string
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	state := routingRuntimeState{
-		strategy:                 "round-robin",
-		sessionAffinityTTL:       time.Hour,
-		sessionAffinitySubagents: true,
-		sessionAffinityRebindOn:  coreauth.SessionAffinityRebindOnAny,
+		strategy:                   "round-robin",
+		useOrLoseShortWindowCapPct: config.DefaultUseOrLoseShortWindowCapPct,
+		sessionAffinityTTL:         time.Hour,
+		sessionAffinitySubagents:   true,
+		sessionAffinityRebindOn:    coreauth.SessionAffinityRebindOnAny,
 	}
 	if cfg == nil {
 		return state
@@ -80,8 +82,13 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.strategy = "fill-first"
 	case "nearest-reset", "nearestreset", "nr":
 		state.strategy = "nearest-reset"
+	case "use-or-lose":
+		state.strategy = "use-or-lose"
 	case "most-used", "mostused", "mu":
 		state.strategy = "most-used"
+	}
+	if state.strategy == "use-or-lose" {
+		state.useOrLoseShortWindowCapPct = cfg.Routing.UseOrLose.EffectiveShortWindowCapPct()
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
@@ -110,6 +117,8 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 		selector = &coreauth.FillFirstSelector{}
 	case "nearest-reset":
 		selector = &coreauth.NearestResetSelector{}
+	case "use-or-lose":
+		selector = &coreauth.UseOrLoseSelector{ShortWindowCapPct: state.useOrLoseShortWindowCapPct}
 	case "most-used":
 		selector = &coreauth.MostUsedSelector{}
 	default:
@@ -268,6 +277,7 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
 		s.coreManager.SetSelector(newRoutingSelector(routingState))
 		s.appliedRoutingState = &routingState
+		log.Infof("config reloaded: routing.strategy=%s session-affinity=%t", routingState.strategy, routingState.sessionAffinity)
 	}
 	s.applyRetryConfig(commit.cfg)
 	store := s.resolveCooldownStateStore(commit.cfg)

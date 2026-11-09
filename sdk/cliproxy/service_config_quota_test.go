@@ -23,6 +23,8 @@ func TestQuotaRoutingSelectors(t *testing.T) {
 		{"mostused", "most-used", &coreauth.MostUsedSelector{}},
 		{"mu", "most-used", &coreauth.MostUsedSelector{}},
 		{" MU ", "most-used", &coreauth.MostUsedSelector{}},
+		{"use-or-lose", "use-or-lose", &coreauth.UseOrLoseSelector{}},
+		{" USE-OR-LOSE ", "use-or-lose", &coreauth.UseOrLoseSelector{}},
 		{"unknown", "round-robin", &coreauth.RoundRobinSelector{}},
 		{"", "round-robin", &coreauth.RoundRobinSelector{}},
 	} {
@@ -42,5 +44,22 @@ func TestQuotaRoutingSelectors(t *testing.T) {
 			}
 			affinity.Stop()
 		})
+	}
+}
+
+func TestUseOrLoseRoutingThreshold(t *testing.T) {
+	t.Parallel()
+	cfg := &internalconfig.Config{Routing: internalconfig.RoutingConfig{Strategy: "use-or-lose"}}
+	initial := normalizedRoutingRuntimeState(cfg)
+	if got := newRoutingSelector(initial).(*coreauth.UseOrLoseSelector).ShortWindowCapPct; got != 95 {
+		t.Fatalf("default threshold = %g; want 95", got)
+	}
+	cfg.Routing.UseOrLose.ShortWindowCapPct = 80.5
+	updated := normalizedRoutingRuntimeState(cfg)
+	if initial == updated {
+		t.Fatal("threshold update did not change runtime state")
+	}
+	if got := newRoutingSelector(updated).(*coreauth.UseOrLoseSelector).ShortWindowCapPct; got != 80.5 {
+		t.Fatalf("updated threshold = %g; want 80.5", got)
 	}
 }

@@ -107,6 +107,7 @@ func (s *Service) Run(ctx context.Context) error {
 		})
 		interval := 15 * time.Minute
 		s.coreManager.StartAutoRefresh(ctx, interval)
+		s.coreManager.StartQuotaSampler(ctx)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
 	}
 

@@ -1022,7 +1022,7 @@ func isStateBlockedByQuotaOrAuth(unavailable bool, quota QuotaState, nextRetryAf
 }
 
 func (s *SessionAffinitySelector) shouldPreserveBindingWhenUnavailable(ctx context.Context, candidates []*Auth, model, authID string, now time.Time) bool {
-	if s == nil || !s.rebindOnQuotaOnly || authID == "" {
+	if s == nil || !s.preservesTransientFailures() || authID == "" {
 		return false
 	}
 	if ctx != nil {
@@ -1031,6 +1031,9 @@ func (s *SessionAffinitySelector) shouldPreserveBindingWhenUnavailable(ctx conte
 			_, ok := transientAuthIDs[authID]
 			return ok
 		}
+	}
+	if _, useOrLose := s.fallback.(*UseOrLoseSelector); useOrLose {
+		return false
 	}
 	for _, candidate := range candidates {
 		if candidate != nil && candidate.ID == authID {
@@ -1099,7 +1102,21 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
 func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	auths = filterCredentialCandidates(ctx, auths)
-	if isQuotaSelector(s.fallback) {
+	if useOrLose, ok := s.fallback.(*UseOrLoseSelector); ok {
+		now := time.Now()
+		var err error
+		auths, err = getSelectorAvailableAuthsAcrossPriorities(ctx, auths, provider, model, now)
+		if err != nil {
+			return nil, err
+		}
+		samples := make(map[*Auth]useOrLoseSample, len(auths))
+		for _, auth := range auths {
+			if auth != nil {
+				samples[auth] = useOrLose.sampleFor(auth, useOrLoseSelectionModel(ctx, auth, model), now)
+			}
+		}
+		auths = preferUseOrLoseRoom(auths, samples)
+	} else if isQuotaSelector(s.fallback) {
 		auths = preferQuotaCapacity(auths, model, time.Now())
 	}
 	entry := selectorLogEntry(ctx)
@@ -1204,6 +1221,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
 				bind(auth.ID, true)
+				s.logUseOrLoseAffinity(ctx, auth, model, now)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 				return auth, nil
 			}
@@ -1242,6 +1260,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			for _, auth := range available {
 				if auth.ID == parentAuthID {
 					bind(auth.ID, true)
+					s.logUseOrLoseAffinity(ctx, auth, model, now)
 					entry.Infof("session-affinity: guardian inherited parent binding | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 					return auth, nil
 				}
@@ -1255,6 +1274,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 				if auth.ID == cachedAuthID {
 					if !isSubagent || s.subagentAffinity {
 						bind(auth.ID, true)
+						s.logUseOrLoseAffinity(ctx, auth, model, now)
 						if isFork {
 							entry.Infof("session-affinity: fork cache hit | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 						} else {
@@ -1368,6 +1388,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 				}
 				entry.Infof("session-affinity: LCP cache hit | session=%s prefix=%d auth=%s provider=%s model=%s", truncateSessionID(match.SessionID), match.PrefixLength, auth.ID, provider, model)
 			}
+			s.logUseOrLoseAffinity(ctx, auth, model, now)
 			return auth, true, nil
 		}
 		if !match.IsFork && s.shouldPreserveBindingWhenUnavailable(ctx, availabilityCandidates, model, match.AuthID, now) {
@@ -1687,9 +1708,7 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		// selected credential is unhealthy, so preserve both explicit and LCP bindings.
 		return
 	}
-	if !res.Success && s.rebindOnQuotaOnly && !shouldRebindSessionAffinityOnError(res.Error) {
-		// Under session-affinity-rebind-on: quota, transient failures fail over for
-		// the current request without unbinding the session from its bound credential.
+	if !res.Success && s.preservesTransientFailures() && !shouldRebindSessionAffinityOnError(res.Error) {
 		return
 	}
 
