@@ -32,6 +32,9 @@ func claudeRateLimitBlockForAuth(auth *Auth, model, upstreamClaim string, now ti
 					quota = state.Quota
 				}
 			}
+			if claudeSampledObservation(auth, quota) {
+				quota = QuotaState{}
+			}
 			if cooldown.Reason == "credential_quota" || claudeQuotaRejectedForModel(quota, model, now) {
 				block.quota = true
 			}
@@ -42,7 +45,8 @@ func claudeRateLimitBlockForAuth(auth *Auth, model, upstreamClaim string, now ti
 	}
 	var windowEnd time.Time
 	hasSession := false
-	for _, bar := range QuotaLimitsForAuth(auth).Bars {
+	observations := slices.DeleteFunc(quotaObservations(auth), func(quota QuotaState) bool { return claudeSampledObservation(auth, quota) })
+	for _, bar := range claudeQuotaBars(observations) {
 		hasSession = hasSession || bar.ID == "session_5h"
 		if bar.ID == "weekly_fable" && !strings.Contains(strings.ToLower(model), "fable") {
 			continue
@@ -77,6 +81,12 @@ func claudeRateLimitBlockForAuth(auth *Auth, model, upstreamClaim string, now ti
 		}
 	}
 	return block
+}
+
+// A usage sample is not a provider rejection. applyQuotaSample stamps the copy
+// it may leave in Auth.Quota with the sample time, which identifies it here.
+func claudeSampledObservation(auth *Auth, quota QuotaState) bool {
+	return !auth.sampledQuota.ObservedAt.IsZero() && quota.ObservedAt.Equal(auth.sampledQuota.ObservedAt)
 }
 
 func claudeQuotaRejectedForModel(quota QuotaState, model string, now time.Time) bool {
