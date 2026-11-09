@@ -355,6 +355,8 @@ oauth-excluded-models-until:
 
 `scripts/fleet/deploy.sh <host> <linux-binary> [client-key]` copies the binary into `~/cliproxyapi/<version>/`, switches the `~/cliproxyapi/cli-proxy-api` symlink, restarts the `cliproxyapi` user unit and checks `/v1/models` with and without a key. `scripts/fleet/rollback.sh <host> [version]` switches back (default `8.0.39`).
 
+Before changing anything remotely, deploy requires local Go and Git, rejects a new binary without `vcs.revision` or with `vcs.modified=true`, fetches `origin` in the script's repository (or `CLIPROXY_REPO` when the script is copied outside a repository), and refuses unless the running commit is known locally and is an ancestor of the new commit. It reads the running commit over SSH from a valid `COMMIT` file next to the resolved active binary, falling back to the binary's embedded `vcs.revision` without making any proxy request, and writes the new commit to `~/cliproxyapi/<version>/COMMIT` during deployment. To deliberately drop running commits, set `DEPLOY_ALLOW_DROPPING_RUNNING` to the exact full running SHA for that invocation; any other value is refused, and `rollback.sh` is unaffected.
+
 ## Usage Statistics
 
 Since v6.10.0, CLIProxyAPI and [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) no longer ship built-in usage statistics. If you need usage statistics, use:
