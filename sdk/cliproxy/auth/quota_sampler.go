@@ -151,6 +151,14 @@ func (s *quotaSampler) pending(a *Auth) bool {
 }
 
 func quotaSampleNeeded(a *Auth, now time.Time) bool {
+	if activeQuotaCooldown(a.Quota, now) {
+		return true
+	}
+	for _, state := range a.ModelStates {
+		if state != nil && activeQuotaCooldown(state.Quota, now) {
+			return true
+		}
+	}
 	if strings.EqualFold(strings.TrimSpace(a.Provider), "claude") && a.sampledFable {
 		fable, _ := useOrLoseClaudeWindow(quotaObservations(a), "7d_oi")
 		if !fable.usable(now) {
@@ -251,6 +259,12 @@ func (m *Manager) applyQuotaSample(ctx context.Context, base *Auth, headers http
 		m.mu.Unlock()
 		return false
 	}
+	observations := quotaObservations(a)
+	now := time.Now()
+	var cooldownRecordsBefore []CooldownStateRecord
+	if m.cooldownStore != nil {
+		cooldownRecordsBefore = m.cooldownStateRecordsForAuthLocked(a, now)
+	}
 	changed := a.sampledQuota.ObserveResponseHeadersForProvider(a.Provider, headers, started)
 	if changed && headers.Get("Anthropic-Ratelimit-Unified-7d_oi-Utilization") != "" {
 		a.sampledFable = true
@@ -258,14 +272,31 @@ func (m *Manager) applyQuotaSample(ctx context.Context, base *Auth, headers http
 	if changed && !a.Quota.ObservedAt.After(started) {
 		a.Quota.ObserveResponseHeadersForProvider(a.Provider, headers, started)
 	}
+	lifted := changed && m.liftObservedQuotaCooldownsLocked(a, append(quotaObservations(a), observations...), now)
 	var snapshot *Auth
+	cooldownStateChanged := false
 	if changed {
 		a.Generation++
+		if lifted {
+			if errPersist := m.persistLocked(ctx, a); errPersist != nil {
+				log.Warnf("failed to persist quota recovery: auth=%s error=%v", a.ID, errPersist)
+			}
+			if m.cooldownStore != nil {
+				cooldownStateChanged = !cooldownStateRecordsEqual(cooldownRecordsBefore, m.cooldownStateRecordsForAuthLocked(a, now))
+			}
+		}
 		snapshot = a.Clone()
 	}
 	m.mu.Unlock()
+	release()
 	if snapshot != nil && m.scheduler != nil {
 		m.scheduler.upsertAuth(snapshot)
+	}
+	if lifted {
+		m.projectQuotaRecovery(snapshot, now)
+	}
+	if cooldownStateChanged {
+		m.persistCooldownStates(context.Background())
 	}
 	return changed
 }

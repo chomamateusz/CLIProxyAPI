@@ -71,7 +71,7 @@ func (s *providerRefusals) record(authID string, refusal *providerRefusal) {
 	}
 }
 
-func (s *providerRefusals) forget(authID, model string) {
+func (s *providerRefusals) forget(authID, model string, credentialScope bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry := s.byAuth[authID]
@@ -81,6 +81,9 @@ func (s *providerRefusals) forget(authID, model string) {
 	delete(entry.probes, model)
 	for key, refusal := range entry.byModel {
 		if refusal.credentialScope {
+			if !credentialScope {
+				continue
+			}
 			delete(entry.byModel, key)
 			clear(entry.probes)
 		} else if key == model {
@@ -180,7 +183,7 @@ func (m *Manager) observeProviderResult(ctx context.Context, result Result) {
 	if refusal != nil {
 		m.refusals.record(result.AuthID, refusal)
 	} else if result.Success {
-		m.refusals.forget(result.AuthID, providerRefusalModelKey(result))
+		m.refusals.forget(result.AuthID, providerRefusalModelKey(result), true)
 	}
 }
 
