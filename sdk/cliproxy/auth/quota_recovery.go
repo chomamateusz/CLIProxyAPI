@@ -138,8 +138,15 @@ func (m *Manager) liftObservedQuotaCooldownsLocked(a *Auth, observations []Quota
 		state := a.ModelStates[model]
 		if a.Quota.Reason == "credential_quota" && activeQuotaCooldown(a.Quota, now) &&
 			(state.credentialQuotaPropagated || state.Quota.Reason == "credential_quota") {
+			state.credentialQuotaPropagated = true
 			state.credentialQuotaShadow = nil
-			state.Quota.Reason = "credential_quota"
+			state.NextRetryAfter = a.Quota.NextRecoverAt
+			applyCooldownFields(&state.Quota, QuotaState{
+				Exceeded:      true,
+				Reason:        "credential_quota",
+				NextRecoverAt: a.Quota.NextRecoverAt,
+				BackoffLevel:  a.Quota.BackoffLevel,
+			})
 		} else {
 			resetModelState(state, now)
 		}

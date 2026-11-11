@@ -513,6 +513,46 @@ func TestQuotaRecoveryExpiredCredentialWrap(t *testing.T) {
 	}
 }
 
+func TestQuotaRecoveryModelLiftExpiresWithCredentialWrap(t *testing.T) {
+	for _, reportingModel := range []string{recoveryOther, recoveryFable} {
+		t.Run(reportingModel, func(t *testing.T) {
+			m, a := recoveryManager(t, false)
+			if _, _, err := m.ResetQuota(context.Background(), a.ID); err != nil {
+				t.Fatal(err)
+			}
+			recoveryRefuse(m, a, recoveryFable, false, recoveryHeaders(time.Now(), 0, 1))
+			retry := time.Hour
+			m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: a.Provider, Model: reportingModel, CredentialScope: true, RetryAfter: &retry, Error: &Error{HTTPStatus: 429, Message: "shared quota exhausted"}})
+			before := recoveryCurrent(t, m, a.ID)
+			state := before.ModelStates[recoveryFable]
+			if state.credentialQuotaShadow == nil || !state.NextRetryAfter.After(before.Quota.NextRecoverAt) || !state.Quota.NextRecoverAt.After(before.Quota.NextRecoverAt) {
+				t.Fatalf("Fable independent cooldown does not outlast credential wrap: %+v", state)
+			}
+			started := time.Now().Add(time.Second)
+			if !m.applyQuotaSample(context.Background(), a, recoveryHeaders(started, 1, 0), started) {
+				t.Fatal("sample was not applied")
+			}
+			got := recoveryCurrent(t, m, a.ID)
+			if !reflect.DeepEqual(cooldownFieldsOf(got.Quota), cooldownFieldsOf(before.Quota)) {
+				t.Fatal("Fable recovery changed the shared cooldown")
+			}
+			state = got.ModelStates[recoveryFable]
+			if !state.credentialQuotaPropagated || state.credentialQuotaShadow != nil {
+				t.Fatalf("Fable recovery did not leave a pure credential wrap: %+v", state)
+			}
+			if !state.NextRetryAfter.Equal(got.Quota.NextRecoverAt) || !reflect.DeepEqual(cooldownFieldsOf(state.Quota), cooldownFieldsOf(got.Quota)) {
+				t.Fatalf("Fable wrap does not match credential cooldown: model=%+v credential=%+v", state, got.Quota)
+			}
+			if blocked, _, _ := isAuthBlockedForModel(got, recoveryFable, time.Now()); !blocked {
+				t.Fatal("Fable recovery bypassed the active credential cooldown")
+			}
+			if blocked, _, next := isAuthBlockedForModel(got, recoveryFable, got.Quota.NextRecoverAt.Add(time.Second)); blocked {
+				t.Fatalf("Fable remains blocked after credential cooldown expires: next=%s state=%+v", next, state)
+			}
+		})
+	}
+}
+
 func TestQuotaRecoveryCadenceTimer(t *testing.T) {
 	m, a := recoveryManager(t, false)
 	s := m.quotaSampler
