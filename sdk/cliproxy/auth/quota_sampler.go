@@ -79,18 +79,44 @@ func (s *quotaSampler) start(parent context.Context) {
 }
 
 func (s *quotaSampler) run(ctx context.Context, ticks <-chan time.Time) {
-	s.scan(ctx, time.Now())
+	timer := time.NewTimer(time.Hour)
+	defer timer.Stop()
+	now := time.Now()
 	for {
-		var now time.Time
+		s.scan(ctx, now)
+		timer.Stop()
+		var due <-chan time.Time
+		if next := s.nextCooldownSampleAt(time.Now()); !next.IsZero() {
+			timer.Reset(time.Until(next))
+			due = timer.C
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case now = <-ticks:
+		case <-due:
+			now = time.Now()
 		case <-s.wake:
 			now = time.Now()
 		}
-		s.scan(ctx, now)
 	}
+}
+
+func (s *quotaSampler) nextCooldownSampleAt(now time.Time) time.Time {
+	auths := s.manager.List()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var next time.Time
+	for _, a := range auths {
+		job := s.jobs[a.ID]
+		if !quotaSampleEligible(a) || !hasActiveQuotaCooldown(a, now) || job == nil || job.inFlight || job.next.IsZero() {
+			continue
+		}
+		if next.IsZero() || job.next.Before(next) {
+			next = job.next
+		}
+	}
+	return next
 }
 
 func (s *quotaSampler) stop() {
@@ -150,7 +176,7 @@ func (s *quotaSampler) pending(a *Auth) bool {
 	return s.running && (job == nil || job.epoch != a.RegistrationEpoch || job.version != a.CredentialVersion || job.next.IsZero())
 }
 
-func quotaSampleNeeded(a *Auth, now time.Time) bool {
+func hasActiveQuotaCooldown(a *Auth, now time.Time) bool {
 	if activeQuotaCooldown(a.Quota, now) {
 		return true
 	}
@@ -158,6 +184,13 @@ func quotaSampleNeeded(a *Auth, now time.Time) bool {
 		if state != nil && activeQuotaCooldown(state.Quota, now) {
 			return true
 		}
+	}
+	return false
+}
+
+func quotaSampleNeeded(a *Auth, now time.Time) bool {
+	if hasActiveQuotaCooldown(a, now) {
+		return true
 	}
 	if strings.EqualFold(strings.TrimSpace(a.Provider), "claude") && a.sampledFable {
 		fable, _ := useOrLoseClaudeWindow(quotaObservations(a), "7d_oi")
@@ -217,6 +250,7 @@ func (s *quotaSampler) scan(ctx context.Context, now time.Time) {
 }
 
 func (s *quotaSampler) finish(ctx context.Context, a *Auth, job *quotaSampleJob, headers http.Header, err error, started, now time.Time) {
+	defer s.manager.wakeQuotaSampler()
 	if err == nil && ctx.Err() == nil {
 		if s.manager.applyQuotaSample(ctx, a, headers, started) {
 			logQuotaSample(a, headers)
@@ -231,7 +265,6 @@ func (s *quotaSampler) finish(ctx context.Context, a *Auth, job *quotaSampleJob,
 	}
 	if job.rescan {
 		delete(s.jobs, a.ID)
-		s.manager.wakeQuotaSampler()
 		return
 	}
 	job.next = now.Add(quotaSampleInterval)

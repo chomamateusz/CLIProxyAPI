@@ -51,6 +51,19 @@ func quotaWindowsRecovered(provider string, sample QuotaState, observations []Qu
 	return false
 }
 
+func propagatedFableQuotaNeedsRecovery(sample QuotaState, observations []QuotaState, refusedAt time.Time) bool {
+	if window, reported := useOrLoseClaudeWindow([]QuotaState{sample}, "7d_oi"); reported {
+		return !quotaRecoveryAllowed(window, refusedAt)
+	}
+	for _, observation := range observations {
+		if window, reported := useOrLoseClaudeWindow([]QuotaState{observation}, "7d_oi"); reported &&
+			(!window.hasUsage || window.utilisation >= 1 || window.rejected) {
+			return true
+		}
+	}
+	return false
+}
+
 func quotaRecoveryErrorAllowed(err *Error) bool {
 	return err == nil || statusCodeFromResult(err) == 429
 }
@@ -63,7 +76,7 @@ func (m *Manager) quotaRefusedAt(authID, model string, updatedAt time.Time) time
 }
 
 func (m *Manager) liftObservedQuotaCooldownsLocked(a *Auth, observations []QuotaState, now time.Time) bool {
-	if a == nil || a.Disabled || a.Status == StatusDisabled || hasUnauthorizedAuthFailure(a) || !quotaRecoveryErrorAllowed(a.LastError) {
+	if a == nil || a.Disabled || a.Status == StatusDisabled || hasUnauthorizedAuthFailure(a) {
 		return false
 	}
 	provider := strings.ToLower(strings.TrimSpace(a.Provider))
@@ -71,7 +84,7 @@ func (m *Manager) liftObservedQuotaCooldownsLocked(a *Auth, observations []Quota
 		return false
 	}
 	credentialLift := a.Quota.Reason == "credential_quota" && activeQuotaCooldown(a.Quota, now) &&
-		quotaRecoveryErrorAllowed(a.LastError) && quotaWindowsRecovered(provider, a.sampledQuota, observations, false, m.quotaRefusedAt(a.ID, "", a.UpdatedAt))
+		quotaWindowsRecovered(provider, a.sampledQuota, observations, false, m.quotaRefusedAt(a.ID, "", a.UpdatedAt))
 	models := make([]string, 0)
 	for model, state := range a.ModelStates {
 		if state == nil {
@@ -111,7 +124,8 @@ func (m *Manager) liftObservedQuotaCooldownsLocked(a *Auth, observations []Quota
 			}
 			if shadow := state.credentialQuotaShadow; shadow != nil && isModelStateActiveCooldown(shadow, now) {
 				*state = *shadow.cloneShallow()
-			} else if provider == "claude" && strings.Contains(strings.ToLower(model), "fable") && state.Quota.Reason == "quota" {
+			} else if provider == "claude" && strings.Contains(strings.ToLower(model), "fable") && state.Quota.Reason == "quota" &&
+				propagatedFableQuotaNeedsRecovery(a.sampledQuota, observations, m.quotaRefusedAt(a.ID, model, state.UpdatedAt)) {
 				state.credentialQuotaPropagated = false
 			} else {
 				resetModelState(state, now)
@@ -122,7 +136,8 @@ func (m *Manager) liftObservedQuotaCooldownsLocked(a *Auth, observations []Quota
 	}
 	for _, model := range models {
 		state := a.ModelStates[model]
-		if state.credentialQuotaPropagated || state.Quota.Reason == "credential_quota" {
+		if a.Quota.Reason == "credential_quota" && activeQuotaCooldown(a.Quota, now) &&
+			(state.credentialQuotaPropagated || state.Quota.Reason == "credential_quota") {
 			state.credentialQuotaShadow = nil
 			state.Quota.Reason = "credential_quota"
 		} else {

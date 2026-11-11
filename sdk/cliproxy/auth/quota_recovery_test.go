@@ -163,7 +163,7 @@ func TestQuotaRecoveryPartial(t *testing.T) {
 }
 
 func TestQuotaRecoveryRefusesUnsafeObservations(t *testing.T) {
-	for _, scenario := range []string{"stale", "equal", "full", "rejected", "response-only-allowed", "missing-usage", "missing-weekly", "short-rejected", "short-stale", "transient", "unauthorized", "payment", "forbidden", "disabled", "status-disabled"} {
+	for _, scenario := range []string{"stale", "equal", "full", "rejected", "response-only-allowed", "missing-usage", "missing-weekly", "short-rejected", "short-stale", "terminal-unauthorized", "disabled", "status-disabled"} {
 		t.Run(scenario, func(t *testing.T) {
 			m, a := recoveryManager(t, false)
 			started := time.Now().Add(time.Second)
@@ -199,12 +199,12 @@ func TestQuotaRecoveryRefusesUnsafeObservations(t *testing.T) {
 					headers.Set("Anthropic-Ratelimit-Unified-5h-Status", "rejected")
 				}
 				headers.Set("Anthropic-Ratelimit-Unified-7d_oi-Status", "rejected")
-			case "transient":
-				live.Quota.Reason = "transient_error"
-				live.LastError = &Error{HTTPStatus: 503, Message: "temporary"}
-			case "unauthorized", "payment", "forbidden":
-				status := map[string]int{"unauthorized": 401, "payment": 402, "forbidden": 403}[scenario]
-				live.LastError = &Error{HTTPStatus: status, Message: "auth refused"}
+			case "terminal-unauthorized":
+				live.Status = StatusError
+				live.Unavailable = true
+				live.NextRetryAfter = time.Time{}
+				live.NextRefreshAfter = time.Time{}
+				live.LastError = &Error{HTTPStatus: 401, Code: "unauthorized", Message: "auth refused"}
 			case "disabled":
 				live.Disabled = true
 			case "status-disabled":
@@ -278,16 +278,19 @@ func TestQuotaRecoveryCadence(t *testing.T) {
 			if calls.Load() != 1 {
 				t.Fatal("fresh observation suppressed quota-cooldown sample")
 			}
-			job := s.jobs[a.ID]
-			s.scan(context.Background(), job.next.Add(-time.Nanosecond))
+			next := s.nextCooldownSampleAt(now)
+			if next.IsZero() || !next.Equal(s.jobs[a.ID].next) || next.Before(now.Add(quotaSampleInterval)) || next.After(time.Now().Add(quotaSampleInterval)) {
+				t.Fatalf("cooldown sample deadline = %s", next)
+			}
+			s.scan(context.Background(), now.Add(quotaSampleInterval))
 			s.workers.Wait()
 			if calls.Load() != 1 {
 				t.Fatal("sample interval was ignored")
 			}
-			s.scan(context.Background(), job.next)
+			s.scan(context.Background(), next)
 			s.workers.Wait()
 			if calls.Load() != 2 {
-				t.Fatal("quota cooldown was not sampled at the next interval")
+				t.Fatal("quota cooldown was not sampled at its timer deadline")
 			}
 		})
 	}
@@ -371,5 +374,164 @@ func TestQuotaRecoveryEmitsExistingRecoveredEvent(t *testing.T) {
 	events = recorder.events()
 	if len(events) != 2 || events[1].Event != "credential_recovered" {
 		t.Fatalf("existing recovered event missing or duplicated: %+v", events)
+	}
+}
+
+func TestQuotaRecoveryIgnoresStaleSiblingError(t *testing.T) {
+	for _, credential := range []bool{false, true} {
+		t.Run(fmt.Sprint(credential), func(t *testing.T) {
+			m, a := recoveryManager(t, false)
+			if !credential {
+				if _, _, err := m.ResetQuota(context.Background(), a.ID); err != nil {
+					t.Fatal(err)
+				}
+				recoveryRefuse(m, a, recoveryFable, false, recoveryHeaders(time.Now(), 0, 1))
+			}
+			m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: a.Provider, Model: recoveryOther, Error: &Error{HTTPStatus: 529, Message: "overloaded"}})
+			m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: a.Provider, Model: recoveryOther, Success: true})
+			before := recoveryCurrent(t, m, a.ID)
+			if before.LastError == nil || before.LastError.HTTPStatus != 529 {
+				t.Fatalf("stale sibling error missing: %+v", before.LastError)
+			}
+			started := time.Now().Add(time.Second)
+			m.applyQuotaSample(context.Background(), a, recoveryHeaders(started, 0, 0), started)
+			got := recoveryCurrent(t, m, a.ID)
+			if blocked, _, _ := isAuthBlockedForModel(got, recoveryFable, time.Now()); blocked {
+				t.Fatalf("stale sibling error prevented quota recovery: %+v", got)
+			}
+			if got.Quota.Reason == "credential_quota" || m.refusals.latest(a.ID, recoveryFable, "") != nil {
+				t.Fatal("quota recovery retained cooldown or provider refusal")
+			}
+		})
+	}
+}
+
+func TestQuotaRecoveryPreservesNonQuotaFailures(t *testing.T) {
+	for _, status := range []int{503, 401, 402, 403} {
+		for _, shadow := range []bool{false, true} {
+			t.Run(fmt.Sprintf("status=%d/shadow=%t", status, shadow), func(t *testing.T) {
+				m, a := recoveryManager(t, false)
+				if _, _, err := m.ResetQuota(context.Background(), a.ID); err != nil {
+					t.Fatal(err)
+				}
+				if shadow {
+					recoveryRefuse(m, a, recoveryFable, true, recoveryHeaders(time.Now(), 1, 1))
+				} else {
+					recoveryRefuse(m, a, recoveryFable, false, recoveryHeaders(time.Now(), 0, 1))
+				}
+				m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: a.Provider, Model: recoveryOther, Error: &Error{HTTPStatus: status, Message: "unrelated failure"}})
+				before := recoveryCurrent(t, m, a.ID).ModelStates[recoveryOther]
+				if shadow {
+					before = before.credentialQuotaShadow
+				}
+				if before == nil || !isModelStateActiveCooldown(before, time.Now()) || before.LastError == nil || before.LastError.HTTPStatus != status {
+					t.Fatalf("non-quota failure missing: %+v", before)
+				}
+				started := time.Now().Add(time.Second)
+				m.applyQuotaSample(context.Background(), a, recoveryHeaders(started, 0, 0), started)
+				got := recoveryCurrent(t, m, a.ID)
+				if !reflect.DeepEqual(got.ModelStates[recoveryOther], before) {
+					t.Fatalf("non-quota cooldown changed: before=%+v after=%+v", before, got.ModelStates[recoveryOther])
+				}
+				if got.Quota.Reason == "credential_quota" || got.ModelStates[recoveryFable].Unavailable {
+					t.Fatal("non-quota sibling failure prevented quota recovery")
+				}
+			})
+		}
+	}
+}
+
+func TestQuotaRecoverySharedRefusalWithoutSampledFableWindow(t *testing.T) {
+	for _, fable := range []string{"absent", "allowed", "rejected", "request-allowed-after-rejected"} {
+		t.Run(fable, func(t *testing.T) {
+			m, a := recoveryManager(t, false)
+			if _, _, err := m.ResetQuota(context.Background(), a.ID); err != nil {
+				t.Fatal(err)
+			}
+			headers := recoveryHeaders(time.Now(), 1, 0.2)
+			switch fable {
+			case "absent":
+				for key := range headers {
+					if strings.Contains(key, "7d_oi") {
+						headers.Del(key)
+					}
+				}
+			case "rejected", "request-allowed-after-rejected":
+				headers = recoveryHeaders(time.Now(), 1, 1)
+			}
+			recoveryRefuse(m, a, recoveryFable, true, headers)
+			if fable == "request-allowed-after-rejected" {
+				observed := a.Clone()
+				observed.Quota.ObserveResponseHeadersForProvider("claude", recoveryHeaders(time.Now(), 0, 0), time.Now())
+				m.MarkResult(fleetHeaders(observed), Result{AuthID: a.ID, Provider: a.Provider, Model: recoveryOther, Success: true})
+			}
+			started := time.Now().Add(time.Second)
+			headers = recoveryHeaders(started, 0, 0)
+			for key := range headers {
+				if strings.Contains(key, "7d_oi") {
+					headers.Del(key)
+				}
+			}
+			m.applyQuotaSample(context.Background(), a, headers, started)
+			got := recoveryCurrent(t, m, a.ID)
+			if got.Quota.Reason == "credential_quota" {
+				t.Fatal("shared cooldown survived shared reset")
+			}
+			blocked, _, _ := isAuthBlockedForModel(got, recoveryFable, time.Now())
+			wantBlocked := fable == "rejected" || fable == "request-allowed-after-rejected"
+			if blocked != wantBlocked {
+				t.Fatalf("Fable blocked = %t, want %t: %+v", blocked, wantBlocked, got.ModelStates[recoveryFable])
+			}
+			if !wantBlocked && (!modelStateIsClean(got.ModelStates[recoveryFable]) || m.refusals.latest(a.ID, recoveryFable, "") != nil) {
+				t.Fatal("credential-derived Fable state or refusal survived shared reset")
+			}
+		})
+	}
+}
+
+func TestQuotaRecoveryExpiredCredentialWrap(t *testing.T) {
+	m, a := recoveryManager(t, false)
+	if _, _, err := m.ResetQuota(context.Background(), a.ID); err != nil {
+		t.Fatal(err)
+	}
+	recoveryRefuse(m, a, recoveryFable, false, recoveryHeaders(time.Now(), 0, 1))
+	retry := time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: a.Provider, Model: recoveryOther, CredentialScope: true, RetryAfter: &retry, Error: &Error{HTTPStatus: 429, Message: "shared quota exhausted"}})
+	m.mu.Lock()
+	live := m.auths[a.ID]
+	live.Quota.NextRecoverAt = time.Now().Add(-time.Second)
+	live.NextRetryAfter = live.Quota.NextRecoverAt
+	m.mu.Unlock()
+	started := time.Now().Add(time.Second)
+	m.applyQuotaSample(context.Background(), a, recoveryHeaders(started, 1, 0), started)
+	got := recoveryCurrent(t, m, a.ID)
+	if !modelStateIsClean(got.ModelStates[recoveryFable]) || got.ModelStates[recoveryFable].credentialQuotaPropagated || got.ModelStates[recoveryFable].credentialQuotaShadow != nil {
+		t.Fatalf("Fable recovery retained expired credential wrap: %+v", got.ModelStates[recoveryFable])
+	}
+	if blocked, _, _ := isAuthBlockedForModel(got, recoveryFable, time.Now()); blocked {
+		t.Fatal("expired credential wrap still blocks Fable")
+	}
+}
+
+func TestQuotaRecoveryCadenceTimer(t *testing.T) {
+	m, a := recoveryManager(t, false)
+	s := m.quotaSampler
+	calls := make(chan struct{}, 1)
+	m.SetRoundTripperProvider(samplerTransport(func(*http.Request) (*http.Response, error) {
+		calls <- struct{}{}
+		return samplerResponse(samplerPayload(time.Now(), 100, 7*24*time.Hour)), nil
+	}))
+	s.jobs[a.ID] = &quotaSampleJob{epoch: a.RegistrationEpoch, version: a.CredentialVersion, next: time.Now().Add(50 * time.Millisecond)}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	t.Cleanup(func() { cancel(); <-done; s.workers.Wait() })
+	go func() {
+		defer close(done)
+		s.run(ctx, nil)
+	}()
+	select {
+	case <-calls:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cooldown sampler waited for another periodic tick instead of its deadline")
 	}
 }
