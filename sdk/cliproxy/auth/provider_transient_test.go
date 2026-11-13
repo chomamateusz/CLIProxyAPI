@@ -266,6 +266,67 @@ func TestTransientResponseSurvivesLaterNetworkFailureAndQuotaRefusal(t *testing.
 	}
 }
 
+func TestExpiredTransientCooldownDoesNotOverrideQuotaRefusalOnRetry(t *testing.T) {
+	for _, mode := range transientTestModes("claude") {
+		t.Run(mode.name, func(t *testing.T) {
+			model := "expired-transient-attempt-" + t.Name()
+			manager, executor := newRefusalTestManager(t, &NearestResetSelector{}, "claude", model, &Auth{ID: "a"}, &Auth{ID: "b"})
+			manager.SetRetryConfig(1, 5*time.Second, 0)
+			markTransientTestResult(manager, "b", model, 429, 51*time.Hour, true)
+			ageRefusals(manager, 2*refusedCredentialRetryGuard)
+			markTransientTestResult(manager, "a", model, 503, time.Second, false)
+			executor.setReply("a", refusalTestReply{err: refusalTestError{status: 429, body: `{"error":"quota"}`, retryAfter: 51 * time.Hour, credentialScoped: true}})
+
+			err := mode.run(manager, model)
+			var unavailable *authUnavailableError
+			var cooldown *modelCooldownError
+			if errors.As(err, &unavailable) || errors.As(err, &cooldown) {
+				t.Fatalf("error = %v (%T), want no stale cooldown error", err, err)
+			}
+			var refusal *ProviderRefusalError
+			if !errors.As(err, &refusal) || refusal.StatusCode() != 429 {
+				t.Fatalf("error = %v (%T), want quota refusal after cooldown expires", err, err)
+			}
+			if calls := executor.takeCalls(); !slices.Equal(calls, []string{"a"}) {
+				t.Fatalf("executor calls = %v, want only a", calls)
+			}
+		})
+	}
+}
+
+func TestTransientCooldownReplacedByQuotaAllowsProbeOnRetry(t *testing.T) {
+	for _, mode := range transientTestModes("claude") {
+		t.Run(mode.name, func(t *testing.T) {
+			model := "replaced-transient-cooldown-" + t.Name()
+			manager, executor := newRefusalTestManager(t, &NearestResetSelector{}, "claude", model, &Auth{ID: "a"}, &Auth{ID: "b"})
+			manager.SetRetryConfig(1, 5*time.Second, 0)
+			markTransientTestResult(manager, "b", model, 429, 2*time.Hour, true)
+			ageRefusals(manager, 2*refusedCredentialRetryGuard)
+			markTransientTestResult(manager, "a", model, 503, time.Second, false)
+			updated := make(chan struct{})
+			go func() {
+				<-time.After(300 * time.Millisecond)
+				markTransientTestResult(manager, "a", model, 429, 40*time.Hour, true)
+				close(updated)
+			}()
+
+			err := mode.run(manager, model)
+			<-updated
+			var unavailable *authUnavailableError
+			var cooldown *modelCooldownError
+			if errors.As(err, &unavailable) || errors.As(err, &cooldown) {
+				t.Fatalf("error = %v (%T), want no stale cooldown error", err, err)
+			}
+			if err != nil {
+				t.Fatalf("probe error = %v, want success", err)
+			}
+			if calls := executor.takeCalls(); !slices.Equal(calls, []string{"b"}) {
+				t.Fatalf("executor calls = %v, want only b", calls)
+			}
+		})
+	}
+}
+
 func TestNetworkAttemptWinsOverQuotaRefusal(t *testing.T) {
 	for _, mode := range transientTestModes("claude") {
 		t.Run(mode.name, func(t *testing.T) {

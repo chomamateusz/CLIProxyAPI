@@ -200,11 +200,11 @@ func (m *Manager) observeProviderResult(ctx context.Context, result Result) {
 type refusalTrackerKey struct{}
 
 type refusalTracker struct {
-	mu           sync.Mutex
-	refused      bool
-	quotaRefused bool
-	last         *providerRefusal
-	retryable    error
+	mu               sync.Mutex
+	refused          bool
+	quotaRefused     bool
+	last             *providerRefusal
+	transientAttempt error
 }
 
 func withRefusalTracker(ctx context.Context) context.Context {
@@ -229,23 +229,15 @@ func (t *refusalTracker) observeFailure(refusal *providerRefusal, transient erro
 	t.refused = t.refused || refusal != nil
 	t.quotaRefused = t.quotaRefused || refusal != nil && refusal.status == http.StatusTooManyRequests
 	_, providerResponse := transient.(*providerTransientError)
-	if transient != nil && (t.retryable == nil || providerResponse) {
-		t.retryable = transient
+	if transient != nil && (t.transientAttempt == nil || providerResponse) {
+		t.transientAttempt = transient
 	}
 }
 
-func (t *refusalTracker) observeCooldown(err error) {
+func (t *refusalTracker) snapshot() (refused bool, last *providerRefusal, transientAttempt error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if _, providerResponse := t.retryable.(*providerTransientError); !providerResponse {
-		t.retryable = err
-	}
-}
-
-func (t *refusalTracker) snapshot() (refused bool, last *providerRefusal, retryable error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.refused, t.last, t.retryable
+	return t.refused, t.last, t.transientAttempt
 }
 
 func (t *refusalTracker) retryableAfterQuotaRefusal() error {
@@ -254,7 +246,7 @@ func (t *refusalTracker) retryableAfterQuotaRefusal() error {
 	if !t.quotaRefused || t.last != nil && t.last.status != http.StatusTooManyRequests {
 		return nil
 	}
-	return t.retryable
+	return t.transientAttempt
 }
 
 // The proxy's note travels in ProxyNoticeHeader so the body stays byte-identical
@@ -310,14 +302,20 @@ func (m *Manager) providerRefusalPassThrough(ctx context.Context, providers []st
 		}
 	}
 	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		now := time.Now()
+		var retryAt time.Time
 		if last != nil && last.status == http.StatusTooManyRequests && !m.HomeEnabled() {
-			now := time.Now()
-			if _, _, retryAt := m.refusedCooldownCandidates(ctx, providers, routeModel, opts, nil, now); !retryAt.IsZero() {
-				tracker.observeCooldown(newAuthUnavailableError(retryAt, now))
-			}
+			_, _, retryAt = m.refusedCooldownCandidates(ctx, providers, routeModel, opts, nil, now)
 		}
-		if retryable := tracker.retryableAfterQuotaRefusal(); retryable != nil {
-			return retryable
+		transientAttempt := tracker.retryableAfterQuotaRefusal()
+		if _, providerResponse := transientAttempt.(*providerTransientError); providerResponse {
+			return transientAttempt
+		}
+		if !retryAt.IsZero() {
+			return newAuthUnavailableError(retryAt, now)
+		}
+		if transientAttempt != nil {
+			return transientAttempt
 		}
 	}
 	var passed *ProviderRefusalError
@@ -353,14 +351,10 @@ func (m *Manager) pickRefusedCredential(ctx context.Context, providers []string,
 	soonest, newest, retryAt := m.refusedCooldownCandidates(ctx, providers, routeModel, opts, tried, now)
 	tracker := refusalTrackerFrom(ctx)
 	if !retryAt.IsZero() {
-		retryable := newAuthUnavailableError(retryAt, now)
-		if tracker != nil {
-			tracker.observeCooldown(retryable)
-		}
-		return nil, nil, "", retryable
+		return nil, nil, "", newAuthUnavailableError(retryAt, now)
 	}
 	if tracker != nil {
-		if refused, _, retryable := tracker.snapshot(); refused || retryable != nil {
+		if refused, _, transientAttempt := tracker.snapshot(); refused || transientAttempt != nil {
 			return nil, nil, "", pickErr
 		}
 	}
