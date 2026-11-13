@@ -92,8 +92,8 @@ func (e *refusalTestExecutor) ExecuteStream(ctx context.Context, auth *Auth, _ c
 
 func (e *refusalTestExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) { return auth, nil }
 
-func (e *refusalTestExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	return cliproxyexecutor.Response{}, errors.New("not implemented")
+func (e *refusalTestExecutor) CountTokens(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return e.Execute(ctx, auth, req, opts)
 }
 
 func (e *refusalTestExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
@@ -303,6 +303,10 @@ func TestAllRefusedCredentialsRetrySoonestAfterGuard(t *testing.T) {
 	}{
 		{"non-stream", func(manager *Manager, model string) error {
 			_, err := manager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+			return err
+		}},
+		{"count", func(manager *Manager, model string) error {
+			_, err := manager.ExecuteCount(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
 			return err
 		}},
 		{"stream", func(manager *Manager, model string) error {

@@ -129,7 +129,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	}
 	if m.HomeEnabled() {
 		resp, errHome := m.executeHome(ctx, normalized, req, opts, false)
-		return resp, providerRefusalPassThrough(ctx, unwrapExecutionBoundaryError(errHome))
+		return resp, m.providerRefusalPassThrough(ctx, normalized, authSelectionModelFromOptions(opts, req.Model), opts, unwrapExecutionBoundaryError(errHome))
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
@@ -174,7 +174,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 				return resp, nil
 			}
 		}
-		return cliproxyexecutor.Response{}, providerRefusalPassThrough(ctx, lastErr)
+		return cliproxyexecutor.Response{}, m.providerRefusalPassThrough(ctx, normalized, retryModel, opts, lastErr)
 	}
 	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
@@ -190,7 +190,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	}
 	if m.HomeEnabled() {
 		resp, errHome := m.executeHome(ctx, normalized, req, opts, true)
-		return resp, providerRefusalPassThrough(ctx, unwrapExecutionBoundaryError(errHome))
+		return resp, m.providerRefusalPassThrough(ctx, normalized, authSelectionModelFromOptions(opts, req.Model), opts, unwrapExecutionBoundaryError(errHome))
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
@@ -227,7 +227,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 			}
 		}
 		lastErr = preferredExecutionAttemptError(lastErr, preferredUpstreamErr)
-		return cliproxyexecutor.Response{}, providerRefusalPassThrough(ctx, unwrapExecutionBoundaryError(lastErr))
+		return cliproxyexecutor.Response{}, m.providerRefusalPassThrough(ctx, normalized, retryModel, opts, unwrapExecutionBoundaryError(lastErr))
 	}
 	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
@@ -313,7 +313,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 				return result, nil
 			}
 		}
-		lastErr = providerRefusalPassThrough(ctx, lastErr)
+		lastErr = m.providerRefusalPassThrough(ctx, normalized, retryModel, opts, lastErr)
 		var bootstrapErr *streamBootstrapError
 		if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
 			return streamErrorResult(bootstrapErr.Headers(), lastErr), nil
