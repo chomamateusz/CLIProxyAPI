@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/fleetusage"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -65,6 +66,7 @@ func (s *Service) Run(ctx context.Context) error {
 		s.cfgMu.Unlock()
 		redisqueue.SetUsageStatisticsEnabled(true)
 	}
+	fleetusage.Start(ctx, fleetusage.ResolveDir(cfg))
 
 	defer func() {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -398,6 +400,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 
 		usage.StopDefault()
+		fleetusage.Stop()
 	})
 	return shutdownErr
 }

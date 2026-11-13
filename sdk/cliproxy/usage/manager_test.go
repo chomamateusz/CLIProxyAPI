@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -184,5 +185,57 @@ func TestManagerPublishBackfillsContextAuthFields(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for usage record")
+	}
+}
+
+type gatedPlugin struct {
+	gate      chan struct{}
+	delivered atomic.Int32
+}
+
+func (p *gatedPlugin) HandleUsage(context.Context, Record) {
+	<-p.gate
+	p.delivered.Add(1)
+}
+
+func TestManagerStopWaitsForDrain(t *testing.T) {
+	m := NewManager(8)
+	plugin := &gatedPlugin{gate: make(chan struct{})}
+	m.Register(plugin)
+	for i := 0; i < 3; i++ {
+		m.Publish(context.Background(), Record{Provider: "openai", Model: "gpt-6"})
+	}
+	stopped := make(chan struct{})
+	go func() {
+		m.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while records were still queued")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(plugin.gate)
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not return after the queue drained")
+	}
+	if got := plugin.delivered.Load(); got != 3 {
+		t.Fatalf("delivered = %d, want 3", got)
+	}
+}
+
+func TestManagerStopWithoutStartReturnsImmediately(t *testing.T) {
+	m := NewManager(8)
+	stopped := make(chan struct{})
+	go func() {
+		m.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("Stop without Start must not wait for a dispatcher")
 	}
 }
