@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -410,11 +411,15 @@ type queueItem struct {
 	record Record
 }
 
+const dispatcherDrainTimeout = 5 * time.Second
+
 // Manager maintains a queue of usage records and delivers them to registered plugins.
 type Manager struct {
 	once     sync.Once
 	stopOnce sync.Once
 	cancel   context.CancelFunc
+	started  atomic.Bool
+	done     chan struct{}
 
 	mu     sync.Mutex
 	cond   *sync.Cond
@@ -428,7 +433,7 @@ type Manager struct {
 
 // NewManager constructs a manager with a buffered queue.
 func NewManager(buffer int) *Manager {
-	m := &Manager{}
+	m := &Manager{done: make(chan struct{})}
 	m.cond = sync.NewCond(&m.mu)
 	return m
 }
@@ -444,11 +449,13 @@ func (m *Manager) Start(ctx context.Context) {
 		}
 		var workerCtx context.Context
 		workerCtx, m.cancel = context.WithCancel(ctx)
+		m.started.Store(true)
 		go m.run(workerCtx)
 	})
 }
 
-// Stop stops the dispatcher and drains the queue.
+// Stop stops the dispatcher and waits, at most dispatcherDrainTimeout, until
+// every queued record has been delivered to every plugin.
 func (m *Manager) Stop() {
 	if m == nil {
 		return
@@ -461,6 +468,14 @@ func (m *Manager) Stop() {
 		m.closed = true
 		m.mu.Unlock()
 		m.cond.Broadcast()
+		if !m.started.Load() {
+			return
+		}
+		select {
+		case <-m.done:
+		case <-time.After(dispatcherDrainTimeout):
+			log.Warnf("usage: dispatcher did not drain within %s; some records may be lost", dispatcherDrainTimeout)
+		}
 	})
 }
 
@@ -548,6 +563,7 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 }
 
 func (m *Manager) run(ctx context.Context) {
+	defer close(m.done)
 	for {
 		m.mu.Lock()
 		for !m.closed && len(m.queue) == 0 {

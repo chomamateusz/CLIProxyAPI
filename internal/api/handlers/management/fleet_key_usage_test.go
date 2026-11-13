@@ -168,9 +168,16 @@ func TestClientKeyUsageWindowAndKeyFilter(t *testing.T) {
 	if keys, ok := body["keys"].([]any); !ok || len(keys) != 0 {
 		t.Fatalf("keys must be an empty array: %v", body)
 	}
-	_, body = getClientKeyUsage(t, h, url.Values{"to": {base.Add(-time.Hour).Format(time.RFC3339)}})
-	if keys := body["keys"].([]any); len(keys) != 0 {
-		t.Fatalf("a window before the data must be empty: %v", body)
+	rec, body = getClientKeyUsage(t, h, url.Values{
+		"from": {base.Add(-3 * time.Hour).Format(time.RFC3339)},
+		"to":   {base.Add(-time.Hour).Format(time.RFC3339)},
+	})
+	if keys, ok := body["keys"].([]any); rec.Code != http.StatusOK || !ok || len(keys) != 0 {
+		t.Fatalf("a window before the data must be empty: %s", rec.Body.String())
+	}
+	rec, body = getClientKeyUsage(t, h, url.Values{"to": {base.Add(-time.Hour).Format(time.RFC3339)}})
+	if rec.Code != http.StatusBadRequest || body["error"] != "invalid_window" || body["message"] != "to precedes the earliest recorded bucket" {
+		t.Fatalf("a to before the earliest bucket with from omitted must be rejected: %d %s", rec.Code, rec.Body.String())
 	}
 
 	for _, query := range []url.Values{

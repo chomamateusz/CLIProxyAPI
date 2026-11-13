@@ -107,8 +107,11 @@ func parseUsageWindow(rawFrom, rawTo string, now, earliest time.Time, recorded b
 		if from.After(to) {
 			return usageWindow{}, errors.New("from must not be after to")
 		}
-	} else if recorded && earliest.Before(to) {
+	} else if recorded {
 		from = earliest
+		if from.After(to) {
+			return usageWindow{}, errors.New("to precedes the earliest recorded bucket")
+		}
 	}
 	return usageWindow{from: from.Truncate(time.Hour), to: ceilHour(to)}, nil
 }
