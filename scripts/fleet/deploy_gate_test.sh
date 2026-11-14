@@ -8,7 +8,7 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CEILING_DIRECTORIES="$TEST_ROOT" GIT_ALLOW_PROTOCOL=file
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GATE_KEY GATE_HOST CLIPROXY_REPO DEPLOY_ALLOW_DROPPING_RUNNING
-mkdir -p "$TEST_ROOT/shims" "$TEST_ROOT/client-shims" "$TEST_ROOT/no-curl"
+mkdir -p "$TEST_ROOT/shims" "$TEST_ROOT/client-shims" "$TEST_ROOT/no-curl" "$TEST_ROOT/short-upload"
 
 cat > "$TEST_ROOT/shims/systemctl" <<'SHIM'
 #!/usr/bin/env bash
@@ -63,8 +63,12 @@ set -euo pipefail
 [ "$#" -eq 3 ] && [ "$1" = version ] && [ "$2" = -m ] && [ -f "$3" ] || exit 93
 cat "$TEST_BUILD_INFO"
 SHIM
-chmod +x "$TEST_ROOT/shims/"* "$TEST_ROOT/client-shims/"*
-for tool in bash env date mkdir head od tr sha256sum mv chmod ln readlink rm rmdir wc flock cat grep; do
+cat > "$TEST_ROOT/short-upload/timeout" <<'SHIM'
+#!/usr/bin/env bash
+exec /usr/bin/timeout 1 "${@:2}"
+SHIM
+chmod +x "$TEST_ROOT/shims/"* "$TEST_ROOT/client-shims/"* "$TEST_ROOT/short-upload/"*
+for tool in bash env date mkdir head od tr sha256sum mv chmod ln readlink rm rmdir wc flock cat grep timeout; do
   ln -s "$(command -v "$tool")" "$TEST_ROOT/no-curl/$tool"
 done
 ln -s "$TEST_ROOT/shims/systemctl" "$TEST_ROOT/no-curl/systemctl"
@@ -153,6 +157,13 @@ run_gate_env() {
 
 run_gate() {
   run_gate_env SSH_ORIGINAL_COMMAND="$1"
+}
+
+run_gate_reader_gone() {
+  set +e
+  env -i HOME="$CASE_HOME" PATH="$GATE_RUN_PATH" SSH_ORIGINAL_COMMAND="$1" /bin/bash "$GATE" < "$GATE_STDIN" 2>&1 | { exit 0; }
+  STATUS=${PIPESTATUS[0]}
+  set -e
 }
 
 expect_output() {
@@ -343,6 +354,27 @@ run_gate "deploy $NEW_VERSION $SOME_SHA $NEW_COMMIT"
 rm -f "$CASE_ROOT/oversize"
 expect_refused 'binary is larger than'
 
+new_case 'refuses: a stalled upload times out and releases the lock'
+mkfifo "$CASE_ROOT/stalled-upload"
+/usr/bin/sleep 30 > "$CASE_ROOT/stalled-upload" &
+stalled_writer=$!
+GATE_STDIN="$CASE_ROOT/stalled-upload"
+GATE_RUN_PATH="$TEST_ROOT/short-upload:$GATE_PATH"
+run_gate "deploy $NEW_VERSION $NEW_SHA $NEW_COMMIT"
+kill "$stalled_writer" 2>/dev/null || true
+wait "$stalled_writer" 2>/dev/null || true
+rm -f "$CASE_ROOT/stalled-upload"
+expect_status 1
+expect_output 'refused: the binary did not arrive within 300 s'
+[ ! -e "$R/$NEW_VERSION/cli-proxy-api.new" ] || fail 'partial upload left behind'
+expect_untouched
+expect_active "$OLD_TARGET"
+GATE_STDIN=/dev/null
+run_gate status
+expect_status 0
+expect_output "binary=$OLD_TARGET"
+pass
+
 new_case 'refuses: existing version with a different sha256'
 write_elf "$NEW_TARGET" 'a different build of the same version'
 GATE_STDIN="$NEW_BINARY"
@@ -364,6 +396,13 @@ if LC_ALL=C grep -q $'\033' "$R/deploy-gate.log"; then fail 'control character l
 logged_command="$(sed -n 's/.* command="\([^"]*\)" result=.*/\1/p' "$R/deploy-gate.log")"
 [ -n "$logged_command" ] || fail 'command not logged'
 [ "${#logged_command}" -le 160 ] || fail "logged command is ${#logged_command} characters"
+pass
+
+new_case 'a refused command cannot plant key=value fields in the log line'
+run_gate 'x" verb=deploy version=fleet-deadbeef result=deployed'
+expect_status 1
+[ "$(last_log_line | grep -o 'result=' | wc -l)" -eq 1 ] || fail "log line carries a forged result field: $(last_log_line)"
+if last_log_line | grep -q 'version='; then fail "log line carries a forged version field: $(last_log_line)"; fi
 pass
 
 new_case 'refuses: missing ~/cliproxyapi'
@@ -437,6 +476,35 @@ expect_status 3
 expect_output "rollback failed, restored $OLD_TARGET"
 expect_active "$OLD_TARGET"
 expect_previous "$LEGACY_TARGET"
+pass
+
+new_case 'a failed deploy still rolls back when the client has gone away'
+write_elf "$NEW_BINARY" 'unhealthy build'
+NEW_SHA="$(sha_of "$NEW_BINARY")"
+GATE_STDIN="$NEW_BINARY"
+run_gate_reader_gone "deploy $NEW_VERSION $NEW_SHA $NEW_COMMIT"
+expect_status 3
+expect_active "$OLD_TARGET"
+expect_restarts 2
+expect_log "result=deploy failed, rolled back to $OLD_TARGET$"
+pass
+
+new_case 'a failed rollback still restores when the client has gone away'
+write_elf "$LEGACY_TARGET" 'unhealthy legacy build'
+run_gate_reader_gone rollback
+expect_status 3
+expect_active "$OLD_TARGET"
+expect_restarts 2
+expect_log "result=rollback failed, restored $OLD_TARGET$"
+pass
+
+new_case 'a healthy deploy is logged as deployed when the client has gone away'
+GATE_STDIN="$NEW_BINARY"
+run_gate_reader_gone "deploy $NEW_VERSION $NEW_SHA $NEW_COMMIT"
+expect_status 0
+expect_active "$NEW_TARGET"
+expect_restarts 1
+expect_log "verb=deploy version=$NEW_VERSION .* result=deployed$"
 pass
 
 rollback_refusal_case() {

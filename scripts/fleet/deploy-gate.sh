@@ -4,6 +4,7 @@ set -euo pipefail
 for inherited_function in $(compgen -A function); do
   unset -f "$inherited_function"
 done
+trap '' PIPE HUP
 
 RAW_COMMAND="${SSH_ORIGINAL_COMMAND-}"
 COMMAND_GIVEN="${SSH_ORIGINAL_COMMAND+x}"
@@ -30,6 +31,7 @@ LOCK_WAIT_SECONDS=600
 MAX_COMMAND_LENGTH=256
 MAX_LOGGED_COMMAND_LENGTH=160
 MAX_BINARY_BYTES=$((256 * 1024 * 1024))
+UPLOAD_SECONDS=300
 
 LOG_READY=""
 LOG_FIELDS=""
@@ -38,9 +40,16 @@ PARTIAL_FILES=()
 CREATED_DIR=""
 
 sanitized_command() {
-  local printable="${RAW_COMMAND//[![:print:]]/}"
-  printable="${printable//\"/\'}"
-  printf '%s' "${printable:0:$MAX_LOGGED_COMMAND_LENGTH}"
+  local accepted_only="${RAW_COMMAND//[!a-z0-9 -]/?}"
+  printf '%s' "${accepted_only:0:$MAX_LOGGED_COMMAND_LENGTH}"
+}
+
+say() {
+  printf '%s\n' "$*" 2>/dev/null || true
+}
+
+say_err() {
+  printf '%s\n' "$*" >&2 2>/dev/null || true
 }
 
 log_call() {
@@ -64,13 +73,13 @@ finish() {
 
 refuse() {
   LOG_RESULT="refused: $1"
-  echo "refused: $1" >&2
+  say_err "refused: $1"
   exit 1
 }
 
 fail_unhealthy() {
   LOG_RESULT="$1"
-  echo "$1" >&2
+  say_err "$1"
   exit 3
 }
 
@@ -147,32 +156,32 @@ switch_to() {
 }
 
 restart_unit() {
-  systemctl --user restart "$UNIT" || echo "systemctl restart $UNIT reported an error" >&2
+  systemctl --user restart "$UNIT" || say_err "systemctl restart $UNIT reported an error"
 }
 
 check_health() {
   local start=$SECONDS attempt=0 state="" code="" have_curl=yes
   if ! command -v curl >/dev/null 2>&1; then
     have_curl=""
-    echo "curl not found; the health check relies on systemctl is-active only"
+    say "curl not found; the health check relies on systemctl is-active only"
   fi
   while [ "$attempt" -lt "$HEALTH_SECONDS" ] && [ $((SECONDS - start)) -lt "$HEALTH_SECONDS" ]; do
     attempt=$((attempt + 1))
     state="$(unit_state)"
     if [ "$state" = active ]; then
       if [ -z "$have_curl" ]; then
-        echo "health: $UNIT is active"
+        say "health: $UNIT is active"
         return 0
       fi
       code="$(curl -q -s -o /dev/null -w '%{http_code}' --connect-timeout 1 --max-time 2 "$HEALTH_URL" || true)"
       if [ "$code" = 401 ]; then
-        echo "health: $UNIT is active and $HEALTH_URL answered 401"
+        say "health: $UNIT is active and $HEALTH_URL answered 401"
         return 0
       fi
     fi
     sleep 1
   done
-  echo "health check failed: $UNIT is $state, $HEALTH_URL answered ${code:-nothing}" >&2
+  say_err "health check failed: $UNIT is $state, $HEALTH_URL answered ${code:-nothing}"
   return 1
 }
 
@@ -187,15 +196,17 @@ run_status() {
     commit="$(commit_of_target "$target")"
   fi
   printf 'active=%s\nbinary=%s\nversion=%s\ncommit=%s\nprevious=%s\n' \
-    "$(unit_state)" "$binary" "$version" "$commit" "$(recorded_previous)"
+    "$(unit_state)" "$binary" "$version" "$commit" "$(recorded_previous)" || true
   LOG_RESULT=ok
 }
 
 receive_binary() {
-  local incoming="$1" size
+  local incoming="$1" size received=0
   rm -f -- "$incoming"
   PARTIAL_FILES+=("$incoming")
-  head -c "$((MAX_BINARY_BYTES + 1))" > "$incoming"
+  timeout "$UPLOAD_SECONDS" head -c "$((MAX_BINARY_BYTES + 1))" > "$incoming" || received=$?
+  [ "$received" -ne 124 ] || refuse "the binary did not arrive within $UPLOAD_SECONDS s"
+  [ "$received" -eq 0 ] || refuse "reading the binary from stdin failed"
   size=$(($(wc -c < "$incoming")))
   [ "$size" -le "$MAX_BINARY_BYTES" ] || refuse "binary is larger than $MAX_BINARY_BYTES bytes"
   [ "$size" -gt 0 ] || refuse "no binary on stdin"
@@ -229,7 +240,7 @@ install_binary() {
   local incoming="$dir/cli-proxy-api.new" final="$dir/cli-proxy-api"
   if [ -e "$final" ]; then
     rm -f -- "$incoming"
-    echo "reusing the identical existing binary $final"
+    say "reusing the identical existing binary $final"
   else
     mv -f -- "$incoming" "$final"
   fi
@@ -269,7 +280,7 @@ run_deploy() {
   restart_unit
   if check_health; then
     LOG_RESULT=deployed
-    echo "deployed $version (commit $commit); previous binary: $(recorded_previous)"
+    say "deployed $version (commit $commit); previous binary: $(recorded_previous)"
     return
   fi
 
@@ -298,7 +309,7 @@ run_rollback() {
   restart_unit
   if check_health; then
     LOG_RESULT="rolled back"
-    echo "rolled back to $target; previous binary: $current"
+    say "rolled back to $target; previous binary: $current"
     return
   fi
 
