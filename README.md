@@ -378,6 +378,33 @@ oauth-excluded-models-until:
 
 Before changing anything remotely, deploy requires local Go and Git, rejects a new binary without `vcs.revision` or with `vcs.modified=true`, fetches `origin` in the script's repository (or `CLIPROXY_REPO` when the script is copied outside a repository), and refuses unless the running commit is known locally and is an ancestor of the new commit. It reads the running commit over SSH from the active binary's embedded `vcs.revision`, or from the `COMMIT` file next to it when the binary has none, without making any proxy request; a `COMMIT` file that disagrees with the embedded revision is refused. Deployment writes the new commit to `~/cliproxyapi/<version>/COMMIT`. To deploy deliberately over a running commit that is not an ancestor, unknown in the local clone, or cannot be identified, set `DEPLOY_ALLOW_DROPPING_RUNNING` to the value the refusal prints (the full running SHA, or `unidentified`) for that invocation; any other value is refused, and `rollback.sh` is unaffected.
 
+### Deploy gate (same-host deploys without a shell)
+
+`scripts/fleet/deploy-gate.sh` is an SSH forced command for the proxy account. It lets one key choose which proxy binary runs and nothing else: no shell, no scp/sftp, no access to `~/.cli-proxy-api`, `config.yaml`, `~/.ssh` or anything outside `~/cliproxyapi`. It reads only `HOME` and `PATH` from its environment and accepts exactly three commands, each field checked against an exact pattern:
+
+- `status`: prints `active=`, `binary=`, `version=`, `commit=` (the version's `COMMIT` file, or `unidentified`) and `previous=` (`.previous-binary`).
+- `deploy <fleet-8hex> <sha256> <40-hex commit>`: the commit must start with the version's 8 hex. The binary comes on stdin (at most 256 MiB, within 300 s, so a stalled upload cannot hold the lock) and must match the sha256 and start with the ELF magic. A version directory is immutable: an existing `cli-proxy-api` with a different sha256 or a `COMMIT` with a different commit is refused, an identical one is reused. The gate writes `COMMIT`, records the replaced target in `.previous-binary`, switches the symlink, restarts `cliproxyapi`, and within 30 s expects `systemctl --user is-active` to say `active` and a keyless `GET http://127.0.0.1:8317/v1/models` to answer 401 (only `is-active` when `curl` is missing). On failure it switches back, restarts and exits 3 with `deploy failed, rolled back to <previous>`.
+- `rollback`: switches to `.previous-binary` (any executable `~/cliproxyapi/<dir>/cli-proxy-api`) and stores the replaced target there, so two rollbacks toggle back; the same health check applies, and a failed one restores the replaced binary and exits 3.
+
+Anything else prints `refused: <reason>` and exits 1 without touching files. Calls are serialised with `flock` on `~/cliproxyapi/.deploy-gate.lock`, and each call appends one line (UTC time, verb, validated fields, result) to `~/cliproxyapi/deploy-gate.log`; a refused command is logged only as its first 160 characters with everything outside `[a-z0-9 -]` turned into `?`. The gate ignores SIGPIPE and SIGHUP, so a client that disconnects mid-deploy cannot stop the health check or the automatic rollback.
+
+Install once, as the proxy account (`chomamateusz-agent--proxy`, which needs lingering enabled so `/run/user/<uid>` exists for `systemctl --user`):
+
+1. `install -m 0755 scripts/fleet/deploy-gate.sh ~/cliproxyapi/deploy-gate.sh` from a reviewed checkout.
+2. Append this line to `~/.ssh/authorized_keys`, with the orchestrator's `~/.ssh/proxy-deploy_ed25519.pub` in place of the placeholder:
+
+   ```
+   from="127.0.0.1,::1",restrict,command="/home/chomamateusz-agent--proxy/cliproxyapi/deploy-gate.sh" ssh-ed25519 <orchestrator public key> orchestrator-proxy-deploy-gate
+   ```
+
+3. As the orchestrator account, accept the host key once (`ssh-keyscan 127.0.0.1 >> ~/.ssh/known_hosts`, after checking the fingerprint), because the client runs with `BatchMode=yes`; then `scripts/fleet/gate-deploy.sh --status` must print the five fields.
+
+Client usage, from the orchestrator account:
+
+- `scripts/fleet/gate-deploy.sh <path>/fleet-<8hex>/cli-proxy-api` runs the same local checks as `deploy.sh` (Go build info without `vcs.modified=true`, exactly one `vcs.revision`, directory named `fleet-` plus its first 8 hex), takes the running commit from the gate's `commit=`, applies the same ancestry guard and `DEPLOY_ALLOW_DROPPING_RUNNING` override, streams the binary to `deploy`, and prints the gate status afterwards. It exits with the gate's code (3 after an automatic rollback).
+- `scripts/fleet/gate-deploy.sh --status` and `--rollback` pass straight through.
+- `GATE_KEY` (default `~/.ssh/proxy-deploy_ed25519`) and `GATE_HOST` (default `chomamateusz-agent--proxy@127.0.0.1`) select the key and the account.
+
 ## Usage Statistics
 
 Since v6.10.0, CLIProxyAPI and [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) no longer ship built-in usage statistics. If you need usage statistics, use:
