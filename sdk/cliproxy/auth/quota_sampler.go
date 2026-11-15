@@ -41,6 +41,7 @@ type quotaSampler struct {
 	workers         sync.WaitGroup
 	running         bool
 	zeroUsageLogged sync.Once
+	endedProjected  map[string]bool
 }
 
 func newQuotaSampler(m *Manager) *quotaSampler {
@@ -86,7 +87,7 @@ func (s *quotaSampler) run(ctx context.Context, ticks <-chan time.Time) {
 		s.scan(ctx, now)
 		timer.Stop()
 		var due <-chan time.Time
-		if next := s.nextCooldownSampleAt(time.Now()); !next.IsZero() {
+		if next := s.nextWakeAt(time.Now()); !next.IsZero() {
 			timer.Reset(time.Until(next))
 			due = timer.C
 		}
@@ -100,6 +101,14 @@ func (s *quotaSampler) run(ctx context.Context, ticks <-chan time.Time) {
 			now = time.Now()
 		}
 	}
+}
+
+func (s *quotaSampler) nextWakeAt(now time.Time) time.Time {
+	next := s.nextCooldownSampleAt(now)
+	if end := nextFleetCredentialEnd(s.manager.List(), now); !end.IsZero() && (next.IsZero() || end.Before(next)) {
+		next = end
+	}
+	return next
 }
 
 func (s *quotaSampler) nextCooldownSampleAt(now time.Time) time.Time {
@@ -213,11 +222,28 @@ func (s *quotaSampler) scan(ctx context.Context, now time.Time) {
 		return
 	}
 	auths := s.manager.List()
+	for _, a := range s.schedule(ctx, auths, now) {
+		s.manager.projectQuotaRecovery(a, now)
+	}
+}
+
+// schedule returns the auths whose model projection must be republished because they
+// are ended or were ended on the previous scan: nothing else republishes it when the
+// end passes without a request, and a re-registration clears the suspension.
+func (s *quotaSampler) schedule(ctx context.Context, auths []*Auth, now time.Time) []*Auth {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	present := make(map[string]bool, len(auths))
+	ended := make(map[string]bool)
+	var reproject []*Auth
 	for _, a := range auths {
 		present[a.ID] = true
+		if FleetCredentialEnded(a, now) {
+			ended[a.ID] = true
+		}
+		if ended[a.ID] || s.endedProjected[a.ID] {
+			reproject = append(reproject, a)
+		}
 		job := s.jobs[a.ID]
 		if job != nil && job.inFlight {
 			job.rescan = job.rescan || !quotaSampleEligible(a) || job.epoch != a.RegistrationEpoch || job.version != a.CredentialVersion
@@ -247,6 +273,8 @@ func (s *quotaSampler) scan(ctx context.Context, now time.Time) {
 			delete(s.jobs, id)
 		}
 	}
+	s.endedProjected = ended
+	return reproject
 }
 
 func (s *quotaSampler) finish(ctx context.Context, a *Auth, job *quotaSampleJob, headers http.Header, err error, started, now time.Time) {

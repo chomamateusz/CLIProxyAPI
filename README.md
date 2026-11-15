@@ -255,7 +255,7 @@ curl -X PATCH -H "Authorization: Bearer $MANAGEMENT_KEY" -d '{"name":"claude-a.j
 curl -X PATCH -H "Authorization: Bearer $MANAGEMENT_KEY" -d '{"name":"claude-a.json","fleet_ends_at":null}' http://host:8317/v8/management/credentials/fields
 ```
 
-Any RFC3339 offset is accepted and stored as UTC seconds; an unparsable value answers `400`. `GET /v8/management/credentials` lists `fleet_ends_at` and `fleet_ended` for credentials that have an end. From the end on, the credential is never selected for a request, its quota is no longer sampled and `/v1/fleet/limits` reports it as `ended`; clearing or moving the end date makes it eligible again immediately.
+Any RFC3339 offset is accepted and stored as UTC seconds; an unparsable value answers `400`. `GET /v8/management/credentials` lists `fleet_ends_at` and `fleet_ended` for credentials that have an end. From the end on, the credential is never selected for a request, its quota is no longer sampled and `/v1/fleet/limits` reports it as `ended`; models served only by ended credentials are no longer listed in `/v1/models` or the limits `models` list; clearing or moving the end date makes it eligible again immediately.
 
 ### Key-issuer credentials
 

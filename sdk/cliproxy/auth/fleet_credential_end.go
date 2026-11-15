@@ -9,6 +9,9 @@ import (
 // Providers expose no cancellation date, so this value is only ever set by hand.
 const MetadataFleetEndsAt = "fleet_ends_at"
 
+// Must not be a quota reason: the registry keeps models of quota-suspended clients listed.
+const fleetCredentialEndedReason = "credential_ended"
+
 func ParseFleetEndsAt(raw string) (time.Time, error) {
 	endsAt, err := time.Parse(time.RFC3339, strings.TrimSpace(raw))
 	if err != nil {
@@ -36,6 +39,17 @@ func FleetCredentialEndsAt(auth *Auth) (time.Time, bool) {
 func FleetCredentialEnded(auth *Auth, now time.Time) bool {
 	endsAt, ok := FleetCredentialEndsAt(auth)
 	return ok && !now.Before(endsAt)
+}
+
+func nextFleetCredentialEnd(auths []*Auth, now time.Time) time.Time {
+	var next time.Time
+	for _, a := range auths {
+		endsAt, ok := FleetCredentialEndsAt(a)
+		if ok && endsAt.After(now) && (next.IsZero() || endsAt.Before(next)) {
+			next = endsAt
+		}
+	}
+	return next
 }
 
 func (s *UseOrLoseSelector) drainsEndingCredentials() bool {
