@@ -14,7 +14,8 @@ import (
 const useOrLoseProbeInterval = time.Minute
 
 type UseOrLoseSelector struct {
-	ShortWindowCapPct float64
+	ShortWindowCapPct      float64
+	DrainEndingCredentials bool
 
 	mu         sync.Mutex
 	probes     map[useOrLoseProbeKey]useOrLoseProbe
@@ -174,12 +175,12 @@ func (s *UseOrLoseSelector) sampleFor(auth *Auth, model string, now time.Time) u
 	}
 	shortActive := short.reset.After(now) || short.reset.IsZero() && short.observed.Add(5*time.Hour).After(now)
 	capPct := s.effectiveShortWindowCapPct()
-	return useOrLoseSample{
+	return s.drainEndingCredential(auth, useOrLoseSample{
 		window:  weekly,
 		sampled: weekly.usable(now),
 		capped:  !creditsAvailable && shortActive && (short.hasUsage && short.utilisation >= capPct/100 || short.rejected),
 		atLimit: !creditsAvailable && (atLimit || weekly.atLimit(now)),
-	}
+	})
 }
 
 func (w useOrLoseWindow) atLimit(now time.Time) bool {
@@ -301,8 +302,10 @@ func updateUseOrLoseSelector(current, replacement Selector) bool {
 		return false
 	}
 	capPct := next.effectiveShortWindowCapPct()
+	drain := next.drainsEndingCredentials()
 	old.mu.Lock()
 	old.ShortWindowCapPct = capPct
+	old.DrainEndingCredentials = drain
 	old.mu.Unlock()
 	return true
 }

@@ -117,6 +117,7 @@ type Auth struct {
 	sampledQuota  QuotaState
 	sampledFable  bool
 	lastRequestAt time.Time
+	subscription  *subscriptionSample
 	Success       int64 `json:"-"`
 	Failed        int64 `json:"-"`
 

@@ -262,6 +262,10 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 	if isSuspended && suspendReason == "" {
 		suspendReason = cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError)
 	}
+	if FleetCredentialEnded(auth, now) {
+		isSuspended = true
+		suspendReason = fleetCredentialEndedReason
+	}
 
 	return registry.ClientModelProjection{
 		ModelID:       targetModel,

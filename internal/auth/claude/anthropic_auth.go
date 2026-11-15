@@ -263,7 +263,7 @@ func (o *ClaudeAuth) fetchOAuthControlPlaneJSON(ctx context.Context, endpoint, a
 
 // FetchOAuthProfile retrieves the account identity associated with an OAuth access token.
 func (o *ClaudeAuth) FetchOAuthProfile(ctx context.Context, accessToken string) (*OAuthProfile, error) {
-	body, errFetch := o.fetchOAuthControlPlaneJSON(ctx, ProfileURL, accessToken, "profile")
+	body, errFetch := o.FetchOAuthProfileBody(ctx, accessToken)
 	if errFetch != nil {
 		return nil, errFetch
 	}
@@ -275,6 +275,12 @@ func (o *ClaudeAuth) FetchOAuthProfile(ctx context.Context, accessToken string) 
 		return nil, fmt.Errorf("fetch Claude OAuth profile: response account UUID is empty")
 	}
 	return &profile, nil
+}
+
+// FetchOAuthProfileBody returns the raw profile, including the organization's
+// subscription fields that OAuthProfile does not decode.
+func (o *ClaudeAuth) FetchOAuthProfileBody(ctx context.Context, accessToken string) ([]byte, error) {
+	return o.fetchOAuthControlPlaneJSON(ctx, ProfileURL, accessToken, "profile")
 }
 
 // FetchOAuthRoles performs the claude_cli roles lookup the native client issues

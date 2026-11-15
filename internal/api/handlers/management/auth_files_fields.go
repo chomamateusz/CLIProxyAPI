@@ -305,6 +305,11 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			delete(req, key)
 		}
 	}
+	fleetEnd, errFleetEnd := takeFleetEndPatch(req)
+	if errFleetEnd != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errFleetEnd.Error()})
+		return
+	}
 
 	ctx := c.Request.Context()
 
@@ -332,8 +337,11 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		return
 	}
 
+	if fleetEnd.needsBillingAnchor(targetAuth.Metadata) {
+		fleetEnd.anchor = h.authManager.LatestSubscriptionBillingAnchor(ctx, targetAuth.ID)
+	}
 	updatedAuth, committed, errModify := h.authManager.Modify(ctx, targetAuth.ID, targetAuth.RegistrationEpoch, func(current *coreauth.Auth) error {
-		return applyAuthFileFieldsPatch(current, req, requestRetryPatch)
+		return applyAuthFileFieldsPatch(current, req, requestRetryPatch, fleetEnd)
 	})
 	if errModify != nil {
 		var patchErr *authFileFieldPatchError
@@ -366,7 +374,7 @@ func (e *authFileFieldPatchError) Error() string {
 	return e.message
 }
 
-func applyAuthFileFieldsPatch(targetAuth *coreauth.Auth, req map[string]json.RawMessage, requestRetryPatch authFileRequestRetryPatch) error {
+func applyAuthFileFieldsPatch(targetAuth *coreauth.Auth, req map[string]json.RawMessage, requestRetryPatch authFileRequestRetryPatch, fleetEnd fleetEndPatch) error {
 	coreauth.NormalizeCredentialMetadata(targetAuth.Metadata)
 
 	changed := false
@@ -424,6 +432,15 @@ func applyAuthFileFieldsPatch(targetAuth *coreauth.Auth, req map[string]json.Raw
 		}
 		if root := rootAuthFileField(fieldPath); root != "" {
 			touchedRoots[root] = struct{}{}
+		}
+		changed = true
+	}
+	if fleetEnd.kind != fleetEndPatchNone {
+		if targetAuth.Metadata == nil {
+			targetAuth.Metadata = make(map[string]any)
+		}
+		if errEnd := fleetEnd.apply(targetAuth.Metadata, time.Now()); errEnd != nil {
+			return &authFileFieldPatchError{message: errEnd.Error()}
 		}
 		changed = true
 	}

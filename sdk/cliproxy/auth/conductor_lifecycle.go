@@ -381,9 +381,11 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	if accountChanged {
 		auth.sampledQuota = QuotaState{}
 		auth.sampledFable = false
+		auth.subscription = nil
 	} else {
 		auth.sampledQuota = existing.sampledQuota.Clone()
 		auth.sampledFable = existing.sampledFable
+		auth.subscription = newerSubscriptionSample(existing.subscription, auth.subscription)
 	}
 	if credChanged {
 		auth.CredentialVersion = max(auth.CredentialVersion, existingVersion) + 1

@@ -76,6 +76,9 @@ func (m *Manager) StopAutoRefresh() {
 	if m.quotaSampler != nil {
 		m.quotaSampler.stop()
 	}
+	if m.subscriptionSampler != nil {
+		m.subscriptionSampler.stop()
+	}
 	m.mu.Lock()
 	cancel := m.refreshCancel
 	m.refreshCancel = nil
