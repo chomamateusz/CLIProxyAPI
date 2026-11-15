@@ -71,7 +71,11 @@ func reconcileFleetEnd(metadata map[string]any, sample *subscriptionSample) (str
 
 func endForInactivePlan(metadata map[string]any, sampledAt time.Time) (string, bool) {
 	if endsAt, ok := fleetMetadataTime(metadata, MetadataFleetEndsAt); ok && !endsAt.After(sampledAt) {
-		return "", false
+		if providerConfirmsFleetEnd(fleetEndSource(metadata)) {
+			return "", false
+		}
+		metadata[MetadataFleetEndsAtSource] = FleetEndSourcePlanEnded
+		return "no active paid plan", true
 	}
 	setFleetEnd(metadata, sampledAt, FleetEndSourcePlanEnded)
 	return "no active paid plan", true
@@ -102,10 +106,36 @@ func reconcileClaudeAnniversary(metadata map[string]any, anchor time.Time) (stri
 	if anchor.IsZero() || !hasEnd || fleetEndSource(metadata) != FleetEndSourceClaudeAnniversary {
 		return "", false
 	}
-	recomputed := nearestBillingAnniversary(anchor, currentEnd)
-	if recomputed.Equal(currentEnd) {
+	if nearestBillingAnniversary(anchor, currentEnd).Equal(currentEnd) {
 		return "", false
 	}
-	setFleetEnd(metadata, recomputed, FleetEndSourceClaudeAnniversary)
+	setFleetEnd(metadata, recomputedAnniversaryEnd(metadata, anchor, currentEnd), FleetEndSourceClaudeAnniversary)
 	return "billing anniversary changed", true
+}
+
+func recomputedAnniversaryEnd(metadata map[string]any, anchor, currentEnd time.Time) time.Time {
+	cancelledAt, ok := fleetMetadataTime(metadata, MetadataFleetCancelledAt)
+	if !ok {
+		if nearest := nearestBillingAnniversary(anchor, currentEnd); nearest.After(anchor) {
+			return nearest
+		}
+		return NextBillingAnniversary(anchor, anchor)
+	}
+	floor := cancelledAt
+	if anchor.After(floor) {
+		floor = anchor
+	}
+	end := NextBillingAnniversary(anchor, floor)
+	for range periodMovesSinceCancel(currentEnd, cancelledAt) {
+		end = NextBillingAnniversary(anchor, end)
+	}
+	return end
+}
+
+func periodMovesSinceCancel(currentEnd, cancelledAt time.Time) int {
+	moves := 0
+	for billingAnniversary(currentEnd, -(moves + 1)).After(cancelledAt) {
+		moves++
+	}
+	return moves
 }

@@ -106,6 +106,10 @@ func TestPaidPlanActivity(t *testing.T) {
 		{"claude cancelled", "claude", claudeProfileBody("canceled", "", "claude_max"), paidPlanInactive},
 		{"claude free org", "claude", claudeProfileBody("active", "", "claude_free"), paidPlanInactive},
 		{"claude no status", "claude", `{"organization":{"organization_type":"claude_max"}}`, paidPlanUnknown},
+		{"claude null status free org", "claude", `{"organization":{"subscription_status":null,"organization_type":"claude_free"},"account":{"has_claude_max":false,"has_claude_pro":false}}`, paidPlanInactive},
+		{"claude no status both flags false", "claude", `{"account":{"has_claude_max":false,"has_claude_pro":false}}`, paidPlanInactive},
+		{"claude no status one flag false", "claude", `{"account":{"has_claude_max":false}}`, paidPlanUnknown},
+		{"claude empty", "claude", `{}`, paidPlanUnknown},
 		{"claude no tier", "claude", `{"organization":{"subscription_status":"active"}}`, paidPlanUnknown},
 		{"codex active", "codex", `{"is_active":true,"entitlement":{"has_active_subscription":true}}`, paidPlanActive},
 		{"codex inactive", "codex", `{"is_active":false,"entitlement":{"has_active_subscription":true}}`, paidPlanInactive},
@@ -208,7 +212,10 @@ func TestReconcileFleetEnd(t *testing.T) {
 	}{
 		{"inactive claude without end", map[string]any{}, "claude", claudeProfileBody("canceled", "", "claude_max"), true, FormatFleetEndsAt(now), FleetEndSourcePlanEnded},
 		{"inactive claude replaces a later manual end", endMetadata(later, FleetEndSourceManual), "claude", claudeProfileBody("canceled", "", "claude_max"), true, FormatFleetEndsAt(now), FleetEndSourcePlanEnded},
-		{"inactive claude keeps an earlier end", endMetadata(earlier, FleetEndSourceManual), "claude", claudeProfileBody("canceled", "", "claude_max"), false, FormatFleetEndsAt(earlier), FleetEndSourceManual},
+		{"inactive claude keeps an earlier end", endMetadata(earlier, FleetEndSourceManual), "claude", claudeProfileBody("canceled", "", "claude_max"), true, FormatFleetEndsAt(earlier), FleetEndSourcePlanEnded},
+		{"inactive claude keeps an earlier anniversary end", endMetadata(earlier, FleetEndSourceClaudeAnniversary), "claude", claudeProfileBody("canceled", "", "claude_max"), true, FormatFleetEndsAt(earlier), FleetEndSourcePlanEnded},
+		{"inactive codex leaves a past codex end", endMetadata(earlier, FleetEndSourceCodexAPI), "codex", `{"is_active":false,"entitlement":{"has_active_subscription":false}}`, false, FormatFleetEndsAt(earlier), FleetEndSourceCodexAPI},
+		{"inactive claude leaves a past plan-ended end", endMetadata(earlier, FleetEndSourcePlanEnded), "claude", claudeProfileBody("canceled", "", "claude_max"), false, FormatFleetEndsAt(earlier), FleetEndSourcePlanEnded},
 		{"unknown claude changes nothing", map[string]any{}, "claude", `{}`, false, "", ""},
 		{"inactive codex", map[string]any{}, "codex", `{"is_active":false,"entitlement":{"has_active_subscription":false}}`, true, FormatFleetEndsAt(now), FleetEndSourcePlanEnded},
 		{"codex cancels_at", map[string]any{}, "codex", `{"will_renew":false,"active_until":"2026-12-05T00:00:00Z","is_active":true,"entitlement":{"cancels_at":"` + cancelsAt + `","has_active_subscription":true}}`, true, cancelsAt, FleetEndSourceCodexAPI},
@@ -223,6 +230,8 @@ func TestReconcileFleetEnd(t *testing.T) {
 		{"claude anchor moved", endMetadata(endTime(t, "2026-12-07T21:09:56Z"), FleetEndSourceClaudeAnniversary), "claude", claudeProfileBody("active", "2026-10-10T08:00:00Z", "claude_max"), true, "2026-12-10T08:00:00Z", FleetEndSourceClaudeAnniversary},
 		{"claude anchor unchanged", endMetadata(endTime(t, "2026-12-07T21:09:56Z"), FleetEndSourceClaudeAnniversary), "claude", claudeProfileBody("active", "2026-10-07T21:09:56Z", "claude_max"), false, "2026-12-07T21:09:56Z", FleetEndSourceClaudeAnniversary},
 		{"claude anchor ignores manual end", endMetadata(later, FleetEndSourceManual), "claude", claudeProfileBody("active", "2026-10-10T08:00:00Z", "claude_max"), false, FormatFleetEndsAt(later), FleetEndSourceManual},
+		{"claude anchor moved before the cancel", endMetadata(endTime(t, "2026-11-07T21:09:56Z"), FleetEndSourceClaudeAnniversary), "claude", claudeProfileBody("active", "2026-10-24T08:00:00Z", "claude_max"), true, "2026-11-24T08:00:00Z", FleetEndSourceClaudeAnniversary},
+		{"claude resubscribed after the cancel", endMetadata(endTime(t, "2026-11-07T21:09:56Z"), FleetEndSourceClaudeAnniversary), "claude", claudeProfileBody("active", "2026-11-05T08:00:00Z", "claude_max"), true, "2026-12-05T08:00:00Z", FleetEndSourceClaudeAnniversary},
 	} {
 		metadata := cloneMetadataMap(tc.metadata)
 		metadata[MetadataFleetCancelledAt] = "2026-11-01T00:00:00Z"
@@ -234,6 +243,26 @@ func TestReconcileFleetEnd(t *testing.T) {
 		}
 		if _, kept := metadata[MetadataFleetCancelledAt]; kept == (tc.wantChanged && tc.wantEnd == "") {
 			t.Errorf("%s: cancel marker kept = %t", tc.name, kept)
+		}
+	}
+}
+
+func TestReconcileClaudeAnniversaryFromCancel(t *testing.T) {
+	t.Parallel()
+	now := endTime(t, "2026-11-15T12:00:00Z")
+	for _, tc := range []struct{ name, end, cancelledAt, anchor, want string }{
+		{"later cancel", "2026-11-07T21:09:56Z", "2026-11-05T00:00:00Z", "2026-10-27T08:00:00Z", "2026-11-27T08:00:00Z"},
+		{"two moves kept", "2027-01-07T21:09:56Z", "2026-11-01T00:00:00Z", "2026-10-24T08:00:00Z", "2027-01-24T08:00:00Z"},
+		{"no cancel marker", "2026-12-07T21:09:56Z", "", "2026-10-10T08:00:00Z", "2026-12-10T08:00:00Z"},
+		{"no cancel marker never at the anchor", "2026-11-07T21:09:56Z", "", "2026-11-05T08:00:00Z", "2026-12-05T08:00:00Z"},
+	} {
+		metadata := endMetadata(endTime(t, tc.end), FleetEndSourceClaudeAnniversary)
+		if tc.cancelledAt != "" {
+			metadata[MetadataFleetCancelledAt] = tc.cancelledAt
+		}
+		_, changed := reconcileFleetEnd(metadata, mustSample(t, "claude", claudeProfileBody("active", tc.anchor, "claude_max"), now))
+		if !changed || metadata[MetadataFleetEndsAt] != tc.want {
+			t.Errorf("%s: changed %t end %v; want %s", tc.name, changed, metadata[MetadataFleetEndsAt], tc.want)
 		}
 	}
 }

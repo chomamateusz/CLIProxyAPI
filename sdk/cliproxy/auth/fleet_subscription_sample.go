@@ -131,21 +131,36 @@ func (s *subscriptionSample) paidPlan() paidPlanActivity {
 }
 
 func (s *subscriptionSample) claudePaidPlan() paidPlanActivity {
-	paidTier := strings.HasPrefix(s.OrganizationType, "claude_max") || strings.HasPrefix(s.OrganizationType, "claude_pro") || strings.HasPrefix(s.OrganizationType, "claude_team") ||
-		subscriptionFlag(s.HasClaudeMax) || subscriptionFlag(s.HasClaudePro)
 	tierUnknown := s.OrganizationType == "" && s.HasClaudeMax == nil && s.HasClaudePro == nil
 	switch {
+	case !s.claudeStatusKnown && s.claudeExplicitlyNotPaid():
+		return paidPlanInactive
 	case !s.claudeStatusKnown:
 		return paidPlanUnknown
 	case s.SubscriptionStatus != "active":
 		return paidPlanInactive
-	case paidTier:
+	case s.claudePaidTier():
 		return paidPlanActive
 	case tierUnknown:
 		return paidPlanUnknown
 	default:
 		return paidPlanInactive
 	}
+}
+
+func (s *subscriptionSample) claudePaidTier() bool {
+	return strings.HasPrefix(s.OrganizationType, "claude_max") || strings.HasPrefix(s.OrganizationType, "claude_pro") || strings.HasPrefix(s.OrganizationType, "claude_team") ||
+		subscriptionFlag(s.HasClaudeMax) || subscriptionFlag(s.HasClaudePro)
+}
+
+func (s *subscriptionSample) claudeExplicitlyNotPaid() bool {
+	if s.claudePaidTier() {
+		return false
+	}
+	if s.OrganizationType != "" {
+		return true
+	}
+	return s.HasClaudeMax != nil && s.HasClaudePro != nil
 }
 
 func subscriptionFlag(flag *bool) bool {

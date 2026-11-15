@@ -252,14 +252,15 @@ func TestSubscriptionSampleRoutesOverdueAndDropsEnded(t *testing.T) {
 
 	upstream.set("tok-overdue", claudeProfileBody("canceled", "2026-10-07T21:09:56Z", "claude_max"), http.StatusOK)
 	current, _ = m.GetByID("overdue")
+	endBeforeInactiveSample := current.Metadata[MetadataFleetEndsAt]
 	sample, err := m.fetchSubscriptionSample(context.Background(), current)
 	if err != nil {
 		t.Fatal(err)
 	}
 	m.applySubscriptionSample(context.Background(), current, sample)
 	current, _ = m.GetByID("overdue")
-	if state := FleetCredentialEndFor(current, time.Now()).State; state != FleetEndStateEnded || current.Metadata[MetadataFleetEndsAtSource] != FleetEndSourceClaudeAnniversary {
-		t.Fatalf("after an inactive post-end sample: state %s metadata %v; want ended with the end kept", state, current.Metadata)
+	if state := FleetCredentialEndFor(current, time.Now()).State; state != FleetEndStateEnded || current.Metadata[MetadataFleetEndsAtSource] != FleetEndSourcePlanEnded || current.Metadata[MetadataFleetEndsAt] != endBeforeInactiveSample {
+		t.Fatalf("after an inactive post-end sample: state %s metadata %v; want ended as plan-ended with the end kept", state, current.Metadata)
 	}
 	if picked, err := pick(); err == nil {
 		t.Fatalf("ended credential picked: %s", picked.ID)
@@ -320,5 +321,36 @@ func TestEndedCredentialDoesNotHideQuotaCooledModel(t *testing.T) {
 	}
 	if !listedByProvider {
 		t.Fatal("provider listing hid a model whose live credential is only quota-cooled")
+	}
+}
+
+func TestInactiveSampleAfterPastEndSurvivesRestart(t *testing.T) {
+	now := time.Now()
+	model := "fleet-end-inactive-persisted"
+	pastEnd := now.Add(-time.Hour).UTC().Truncate(time.Second)
+	upstream := newSubscriptionUpstream()
+	upstream.set("tok-lapsed", claudeProfileBody("canceled", "2026-10-07T21:09:56Z", "claude_max"), http.StatusOK)
+	m := NewManager(nil, nil, nil)
+	m.SetRoundTripperProvider(upstream.transport())
+	lapsed := subscriptionAuth("lapsed", "claude", endMetadata(pastEnd, FleetEndSourceManual))
+	registerAuths(t, m, lapsed)
+	current, _ := m.GetByID("lapsed")
+	sample, err := m.fetchSubscriptionSample(context.Background(), current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.applySubscriptionSample(context.Background(), current, sample)
+
+	current, _ = m.GetByID("lapsed")
+	persisted := cloneMetadataMap(current.Metadata)
+	if end := FleetCredentialEndFromMetadata(persisted, time.Now()); end.State != FleetEndStateEnded || end.Source != FleetEndSourcePlanEnded || !end.EndsAt.Equal(pastEnd) {
+		t.Fatalf("persisted end without the sample = %+v; want ended as plan-ended at %s", end, FormatFleetEndsAt(pastEnd))
+	}
+
+	restarted := NewManager(nil, &FillFirstSelector{}, nil)
+	restarted.RegisterExecutor(schedulerTestExecutor{provider: "claude"})
+	registerFleetEndModel(t, restarted, model, &Auth{ID: "lapsed", Provider: "claude", Metadata: persisted})
+	if picked, _, err := restarted.pickNext(context.Background(), "claude", model, cliproxyexecutor.Options{Metadata: map[string]any{}}, nil); err == nil {
+		t.Fatalf("lapsed credential picked after a restart: %s", picked.ID)
 	}
 }
