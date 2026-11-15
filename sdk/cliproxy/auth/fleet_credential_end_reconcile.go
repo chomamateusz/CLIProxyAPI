@@ -57,9 +57,27 @@ func MoveFleetEndToNextPeriod(metadata map[string]any, anchor time.Time) error {
 }
 
 func reconcileFleetEnd(metadata map[string]any, sample *subscriptionSample) (string, bool) {
-	if sample.paidPlan() == paidPlanInactive {
+	switch sample.paidPlan() {
+	case paidPlanInactive:
 		return endForInactivePlan(metadata, sample.SampledAt)
+	case paidPlanActive:
+		if planEndedEndSet(metadata) {
+			ClearFleetEnd(metadata)
+			if reason, changed := reconcileProviderEnd(metadata, sample); changed {
+				return "paid plan active again; " + reason, true
+			}
+			return "paid plan active again", true
+		}
 	}
+	return reconcileProviderEnd(metadata, sample)
+}
+
+func planEndedEndSet(metadata map[string]any) bool {
+	_, ok := fleetMetadataTime(metadata, MetadataFleetEndsAt)
+	return ok && fleetEndSource(metadata) == FleetEndSourcePlanEnded
+}
+
+func reconcileProviderEnd(metadata map[string]any, sample *subscriptionSample) (string, bool) {
 	switch sample.Provider {
 	case "codex":
 		return reconcileCodexEnd(metadata, sample)

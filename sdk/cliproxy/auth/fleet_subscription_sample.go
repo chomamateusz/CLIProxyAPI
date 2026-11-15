@@ -130,37 +130,34 @@ func (s *subscriptionSample) paidPlan() paidPlanActivity {
 	}
 }
 
+const claudeStatusPastDue = "past_due"
+
 func (s *subscriptionSample) claudePaidPlan() paidPlanActivity {
-	tierUnknown := s.OrganizationType == "" && s.HasClaudeMax == nil && s.HasClaudePro == nil
-	switch {
-	case !s.claudeStatusKnown && s.claudeExplicitlyNotPaid():
-		return paidPlanInactive
-	case !s.claudeStatusKnown:
-		return paidPlanUnknown
-	case s.SubscriptionStatus != "active":
-		return paidPlanInactive
-	case s.claudePaidTier():
-		return paidPlanActive
-	case tierUnknown:
-		return paidPlanUnknown
-	default:
+	if s.claudeStatusKnown {
+		switch s.SubscriptionStatus {
+		case "active", "trialing", claudeStatusPastDue:
+			return paidPlanActive
+		case "canceled", "unpaid", "incomplete_expired", "paused":
+			return paidPlanInactive
+		}
+	}
+	if s.claudeExplicitlyNotPaid() {
 		return paidPlanInactive
 	}
+	return paidPlanUnknown
 }
 
-func (s *subscriptionSample) claudePaidTier() bool {
-	return strings.HasPrefix(s.OrganizationType, "claude_max") || strings.HasPrefix(s.OrganizationType, "claude_pro") || strings.HasPrefix(s.OrganizationType, "claude_team") ||
-		subscriptionFlag(s.HasClaudeMax) || subscriptionFlag(s.HasClaudePro)
+func (s *subscriptionSample) claudePastDue() bool {
+	return s.Provider == "claude" && s.claudeStatusKnown && s.SubscriptionStatus == claudeStatusPastDue
 }
 
 func (s *subscriptionSample) claudeExplicitlyNotPaid() bool {
-	if s.claudePaidTier() {
-		return false
-	}
-	if s.OrganizationType != "" {
-		return true
-	}
-	return s.HasClaudeMax != nil && s.HasClaudePro != nil
+	return s.HasClaudeMax != nil && !*s.HasClaudeMax && s.HasClaudePro != nil && !*s.HasClaudePro &&
+		s.OrganizationType != "" && !claudePaidOrganizationType(s.OrganizationType)
+}
+
+func claudePaidOrganizationType(organizationType string) bool {
+	return strings.HasPrefix(organizationType, "claude_max") || strings.HasPrefix(organizationType, "claude_pro") || strings.HasPrefix(organizationType, "claude_team")
 }
 
 func subscriptionFlag(flag *bool) bool {

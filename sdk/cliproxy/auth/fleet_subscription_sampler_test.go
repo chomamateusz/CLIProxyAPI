@@ -354,3 +354,97 @@ func TestInactiveSampleAfterPastEndSurvivesRestart(t *testing.T) {
 		t.Fatalf("lapsed credential picked after a restart: %s", picked.ID)
 	}
 }
+
+func applyLatestSubscriptionSample(t *testing.T, m *Manager, id string) *Auth {
+	t.Helper()
+	current, _ := m.GetByID(id)
+	sample, err := m.fetchSubscriptionSample(context.Background(), current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.applySubscriptionSample(context.Background(), current, sample)
+	current, _ = m.GetByID(id)
+	return current
+}
+
+func TestPlanEndedCredentialResumesAfterResubscription(t *testing.T) {
+	model := "fleet-end-plan-resubscribed"
+	upstream := newSubscriptionUpstream()
+	upstream.set("tok-resub", claudeProfileBody("canceled", "2026-10-07T21:09:56Z", "claude_max"), http.StatusOK)
+	m := NewManager(nil, &FillFirstSelector{}, nil)
+	m.RegisterExecutor(schedulerTestExecutor{provider: "claude"})
+	m.SetRoundTripperProvider(upstream.transport())
+	registerFleetEndModel(t, m, model, subscriptionAuth("resub", "claude", map[string]any{MetadataFleetCancelledAt: "2026-11-01T00:00:00Z"}))
+	pick := func() (*Auth, error) {
+		picked, _, err := m.pickNext(context.Background(), "claude", model, cliproxyexecutor.Options{Metadata: map[string]any{}}, nil)
+		return picked, err
+	}
+
+	current := applyLatestSubscriptionSample(t, m, "resub")
+	if !FleetCredentialEnded(current, time.Now()) || current.Metadata[MetadataFleetEndsAtSource] != FleetEndSourcePlanEnded {
+		t.Fatalf("after the lapse: metadata %v; want ended as plan-ended", current.Metadata)
+	}
+	if picked, err := pick(); err == nil {
+		t.Fatalf("plan-ended credential picked: %s", picked.ID)
+	}
+	m.quotaSampler.scan(context.Background(), time.Now())
+	if fleetEndModelListed(model) || quotaSampleEligible(current) {
+		t.Fatal("plan-ended credential still listed or quota-sampled")
+	}
+
+	upstream.set("tok-resub", claudeProfileBody("active", "2026-11-14T09:00:00Z", "claude_max"), http.StatusOK)
+	current = applyLatestSubscriptionSample(t, m, "resub")
+	for _, key := range []string{MetadataFleetEndsAt, MetadataFleetEndsAtSource, MetadataFleetCancelledAt} {
+		if _, ok := current.Metadata[key]; ok {
+			t.Fatalf("after the resubscription %s survived: %v", key, current.Metadata)
+		}
+	}
+	if end := FleetCredentialEndFor(current, time.Now()); end.State != FleetEndStateNone {
+		t.Fatalf("after the resubscription state = %s; want none", end.State)
+	}
+	if picked, err := pick(); err != nil || picked.ID != "resub" {
+		t.Fatalf("resubscribed credential: picked %v, %v", picked, err)
+	}
+	if !quotaSampleEligible(current) {
+		t.Fatal("resubscribed credential is not quota-sampled")
+	}
+	m.quotaSampler.scan(context.Background(), time.Now())
+	if !fleetEndModelListed(model) {
+		t.Fatal("resubscribed credential does not advertise its model")
+	}
+	if persisted := FleetCredentialEndFromMetadata(cloneMetadataMap(current.Metadata), time.Now()); persisted.State != FleetEndStateNone {
+		t.Fatalf("persisted end after the resubscription = %+v; want none", persisted)
+	}
+}
+
+func TestPastDueClaudeStaysRoutableUntilPaid(t *testing.T) {
+	model := "fleet-end-past-due"
+	upstream := newSubscriptionUpstream()
+	upstream.set("tok-late", claudeProfileBody("past_due", "2026-10-07T21:09:56Z", "claude_max"), http.StatusOK)
+	m := NewManager(nil, &FillFirstSelector{}, nil)
+	m.RegisterExecutor(schedulerTestExecutor{provider: "claude"})
+	m.SetRoundTripperProvider(upstream.transport())
+	registerFleetEndModel(t, m, model, subscriptionAuth("late", "claude", nil))
+	pick := func() (*Auth, error) {
+		picked, _, err := m.pickNext(context.Background(), "claude", model, cliproxyexecutor.Options{Metadata: map[string]any{}}, nil)
+		return picked, err
+	}
+
+	current := applyLatestSubscriptionSample(t, m, "late")
+	end := FleetCredentialEndFor(current, time.Now())
+	if end.State != FleetEndStateNone || len(end.Warnings) != 1 || end.Warnings[0].Code != FleetEndWarningPaymentPastDue {
+		t.Fatalf("past due: end %+v metadata %v; want no end and payment_past_due", end, current.Metadata)
+	}
+	if picked, err := pick(); err != nil || picked.ID != "late" {
+		t.Fatalf("past due credential: picked %v, %v", picked, err)
+	}
+
+	upstream.set("tok-late", claudeProfileBody("active", "2026-10-07T21:09:56Z", "claude_max"), http.StatusOK)
+	current = applyLatestSubscriptionSample(t, m, "late")
+	if end := FleetCredentialEndFor(current, time.Now()); end.State != FleetEndStateNone || len(end.Warnings) != 0 {
+		t.Fatalf("paid again: end %+v; want no end and no warnings", end)
+	}
+	if picked, err := pick(); err != nil || picked.ID != "late" {
+		t.Fatalf("paid credential: picked %v, %v", picked, err)
+	}
+}

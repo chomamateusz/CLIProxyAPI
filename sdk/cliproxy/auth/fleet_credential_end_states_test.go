@@ -2,6 +2,7 @@ package auth
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -104,13 +105,24 @@ func TestPaidPlanActivity(t *testing.T) {
 		{"claude team", "claude", claudeProfileBody("active", "", "claude_team_standard"), paidPlanActive},
 		{"claude flag only", "claude", `{"account":{"has_claude_max":true},"organization":{"subscription_status":"active","organization_type":"other"}}`, paidPlanActive},
 		{"claude cancelled", "claude", claudeProfileBody("canceled", "", "claude_max"), paidPlanInactive},
-		{"claude free org", "claude", claudeProfileBody("active", "", "claude_free"), paidPlanInactive},
+		{"claude active status wins over free flags", "claude", claudeProfileBody("active", "", "claude_free"), paidPlanActive},
+		{"claude trialing", "claude", claudeProfileBody("trialing", "", "claude_max"), paidPlanActive},
+		{"claude past due", "claude", claudeProfileBody("past_due", "", "claude_max"), paidPlanActive},
+		{"claude past due with free flags", "claude", claudeProfileBody("past_due", "", "claude_free"), paidPlanActive},
+		{"claude unpaid", "claude", claudeProfileBody("unpaid", "", "claude_max"), paidPlanInactive},
+		{"claude incomplete expired", "claude", claudeProfileBody("incomplete_expired", "", "claude_max"), paidPlanInactive},
+		{"claude paused", "claude", claudeProfileBody("paused", "", "claude_max"), paidPlanInactive},
+		{"claude other status paid org", "claude", claudeProfileBody("incomplete", "", "claude_max"), paidPlanUnknown},
+		{"claude other status free org", "claude", claudeProfileBody("incomplete", "", "claude_free"), paidPlanInactive},
+		{"claude empty status free org", "claude", claudeProfileBody("", "", "claude_free"), paidPlanInactive},
 		{"claude no status", "claude", `{"organization":{"organization_type":"claude_max"}}`, paidPlanUnknown},
 		{"claude null status free org", "claude", `{"organization":{"subscription_status":null,"organization_type":"claude_free"},"account":{"has_claude_max":false,"has_claude_pro":false}}`, paidPlanInactive},
-		{"claude no status both flags false", "claude", `{"account":{"has_claude_max":false,"has_claude_pro":false}}`, paidPlanInactive},
-		{"claude no status one flag false", "claude", `{"account":{"has_claude_max":false}}`, paidPlanUnknown},
+		{"claude null status paid org with free flags", "claude", `{"organization":{"subscription_status":null,"organization_type":"claude_max"},"account":{"has_claude_max":false,"has_claude_pro":false}}`, paidPlanUnknown},
+		{"claude null status free org with a paid flag", "claude", `{"organization":{"subscription_status":null,"organization_type":"claude_free"},"account":{"has_claude_max":true,"has_claude_pro":false}}`, paidPlanUnknown},
+		{"claude no status both flags false without org type", "claude", `{"account":{"has_claude_max":false,"has_claude_pro":false}}`, paidPlanUnknown},
+		{"claude no status one flag false", "claude", `{"organization":{"organization_type":"claude_free"},"account":{"has_claude_max":false}}`, paidPlanUnknown},
 		{"claude empty", "claude", `{}`, paidPlanUnknown},
-		{"claude no tier", "claude", `{"organization":{"subscription_status":"active"}}`, paidPlanUnknown},
+		{"claude active without tier", "claude", `{"organization":{"subscription_status":"active"}}`, paidPlanActive},
 		{"codex active", "codex", `{"is_active":true,"entitlement":{"has_active_subscription":true}}`, paidPlanActive},
 		{"codex inactive", "codex", `{"is_active":false,"entitlement":{"has_active_subscription":true}}`, paidPlanInactive},
 		{"codex no entitlement", "codex", `{"is_active":true,"entitlement":{"has_active_subscription":false}}`, paidPlanInactive},
@@ -193,6 +205,17 @@ func TestFleetEndWarnings(t *testing.T) {
 	if len(graced) != 1 || graced[0].Code != FleetEndWarningGracePeriod || graced[0].Until == nil || *graced[0].Until != "2026-11-20T00:00:00Z" {
 		t.Fatalf("grace warnings = %+v", graced)
 	}
+	pastDue := mustSample(t, "claude", claudeProfileBody("past_due", "2026-10-07T21:09:56Z", "claude_max"), now)
+	for _, metadata := range []map[string]any{{}, endMetadata(end, FleetEndSourceClaudeAnniversary)} {
+		warned := fleetCredentialEnd(metadata, pastDue, now)
+		if len(warned.Warnings) != 1 || warned.Warnings[0].Code != FleetEndWarningPaymentPastDue || warned.Warnings[0].Until != nil {
+			t.Fatalf("past due warnings with %v = %+v; want payment_past_due", metadata, warned.Warnings)
+		}
+	}
+	active := mustSample(t, "claude", claudeProfileBody("active", "2026-10-07T21:09:56Z", "claude_max"), now)
+	if got := fleetCredentialEnd(map[string]any{}, active, now).Warnings; len(got) != 0 {
+		t.Fatalf("active claude warnings = %+v; want none", got)
+	}
 }
 
 func TestReconcileFleetEnd(t *testing.T) {
@@ -217,6 +240,16 @@ func TestReconcileFleetEnd(t *testing.T) {
 		{"inactive codex leaves a past codex end", endMetadata(earlier, FleetEndSourceCodexAPI), "codex", `{"is_active":false,"entitlement":{"has_active_subscription":false}}`, false, FormatFleetEndsAt(earlier), FleetEndSourceCodexAPI},
 		{"inactive claude leaves a past plan-ended end", endMetadata(earlier, FleetEndSourcePlanEnded), "claude", claudeProfileBody("canceled", "", "claude_max"), false, FormatFleetEndsAt(earlier), FleetEndSourcePlanEnded},
 		{"unknown claude changes nothing", map[string]any{}, "claude", `{}`, false, "", ""},
+		{"past due claude never ends", map[string]any{}, "claude", claudeProfileBody("past_due", "", "claude_max"), false, "", ""},
+		{"past due claude keeps a later manual end", endMetadata(later, FleetEndSourceManual), "claude", claudeProfileBody("past_due", "", "claude_max"), false, FormatFleetEndsAt(later), FleetEndSourceManual},
+		{"active claude clears a plan-ended end", endMetadata(earlier, FleetEndSourcePlanEnded), "claude", claudeProfileBody("active", "", "claude_max"), true, "", ""},
+		{"past due claude clears a plan-ended end", endMetadata(earlier, FleetEndSourcePlanEnded), "claude", claudeProfileBody("past_due", "", "claude_max"), true, "", ""},
+		{"unknown claude keeps a plan-ended end", endMetadata(earlier, FleetEndSourcePlanEnded), "claude", `{}`, false, FormatFleetEndsAt(earlier), FleetEndSourcePlanEnded},
+		{"active codex clears a plan-ended end", endMetadata(earlier, FleetEndSourcePlanEnded), "codex", `{"is_active":true,"entitlement":{"has_active_subscription":true}}`, true, "", ""},
+		{"half active codex keeps a plan-ended end", endMetadata(earlier, FleetEndSourcePlanEnded), "codex", `{"is_active":true}`, false, FormatFleetEndsAt(earlier), FleetEndSourcePlanEnded},
+		{"active claude keeps a past manual end", endMetadata(earlier, FleetEndSourceManual), "claude", claudeProfileBody("active", "", "claude_max"), false, FormatFleetEndsAt(earlier), FleetEndSourceManual},
+		{"active claude keeps a past anniversary end", endMetadata(earlier, FleetEndSourceClaudeAnniversary), "claude", claudeProfileBody("active", "", "claude_max"), false, FormatFleetEndsAt(earlier), FleetEndSourceClaudeAnniversary},
+		{"active codex keeps a past codex end", endMetadata(earlier, FleetEndSourceCodexAPI), "codex", `{"is_active":true,"entitlement":{"has_active_subscription":true}}`, false, FormatFleetEndsAt(earlier), FleetEndSourceCodexAPI},
 		{"inactive codex", map[string]any{}, "codex", `{"is_active":false,"entitlement":{"has_active_subscription":false}}`, true, FormatFleetEndsAt(now), FleetEndSourcePlanEnded},
 		{"codex cancels_at", map[string]any{}, "codex", `{"will_renew":false,"active_until":"2026-12-05T00:00:00Z","is_active":true,"entitlement":{"cancels_at":"` + cancelsAt + `","has_active_subscription":true}}`, true, cancelsAt, FleetEndSourceCodexAPI},
 		{"codex will not renew", map[string]any{}, "codex", `{"will_renew":false,"active_until":"2026-12-05T00:00:00Z","is_active":true,"entitlement":{"expires_at":"2026-12-06T00:00:00Z","has_active_subscription":true}}`, true, "2026-12-05T00:00:00Z", FleetEndSourceCodexAPI},
@@ -243,6 +276,41 @@ func TestReconcileFleetEnd(t *testing.T) {
 		}
 		if _, kept := metadata[MetadataFleetCancelledAt]; kept == (tc.wantChanged && tc.wantEnd == "") {
 			t.Errorf("%s: cancel marker kept = %t", tc.name, kept)
+		}
+	}
+}
+
+func TestReconcilePlanEndedRoundTrip(t *testing.T) {
+	t.Parallel()
+	now := endTime(t, "2026-11-15T12:00:00Z")
+	for _, tc := range []struct{ name, provider, inactive, active, wantEnd, wantSource string }{
+		{"claude resubscribed", "claude", claudeProfileBody("canceled", "", "claude_max"), claudeProfileBody("active", "", "claude_max"), "", ""},
+		{"claude payment retry after unpaid", "claude", claudeProfileBody("unpaid", "", "claude_max"), claudeProfileBody("active", "", "claude_max"), "", ""},
+		{"codex resubscribed", "codex", `{"is_active":false,"entitlement":{"has_active_subscription":false}}`, `{"will_renew":true,"is_active":true,"entitlement":{"has_active_subscription":true}}`, "", ""},
+		{"codex resubscribed without renewal", "codex", `{"is_active":false,"entitlement":{"has_active_subscription":false}}`, `{"is_active":true,"entitlement":{"cancels_at":"2026-12-20T00:00:00Z","has_active_subscription":true}}`, "2026-12-20T00:00:00Z", FleetEndSourceCodexAPI},
+	} {
+		metadata := map[string]any{MetadataFleetCancelledAt: "2026-11-01T00:00:00Z"}
+		if _, changed := reconcileFleetEnd(metadata, mustSample(t, tc.provider, tc.inactive, now)); !changed || metadata[MetadataFleetEndsAtSource] != FleetEndSourcePlanEnded {
+			t.Fatalf("%s: inactive sample left %v", tc.name, metadata)
+		}
+		if state := fleetCredentialEnd(metadata, nil, now.Add(time.Hour)).State; state != FleetEndStateEnded {
+			t.Fatalf("%s: state after the lapse = %s; want ended", tc.name, state)
+		}
+		resumed := mustSample(t, tc.provider, tc.active, now.Add(2*time.Hour))
+		reason, changed := reconcileFleetEnd(metadata, resumed)
+		gotEnd, _ := metadata[MetadataFleetEndsAt].(string)
+		gotSource, _ := metadata[MetadataFleetEndsAtSource].(string)
+		if !changed || !strings.HasPrefix(reason, "paid plan active again") || gotEnd != tc.wantEnd || gotSource != tc.wantSource {
+			t.Errorf("%s: resumed %t %q end %q source %q; want end %q source %q", tc.name, changed, reason, gotEnd, gotSource, tc.wantEnd, tc.wantSource)
+		}
+		if _, kept := metadata[MetadataFleetCancelledAt]; kept {
+			t.Errorf("%s: cancel marker survived the resubscription", tc.name)
+		}
+		if state := fleetCredentialEnd(metadata, resumed, now.Add(3*time.Hour)).State; state == FleetEndStateEnded {
+			t.Errorf("%s: still ended after the resubscription", tc.name)
+		}
+		if _, changed := reconcileFleetEnd(metadata, resumed); changed {
+			t.Errorf("%s: a second active sample changed the end again", tc.name)
 		}
 	}
 }

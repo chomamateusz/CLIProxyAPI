@@ -33,6 +33,7 @@ const (
 const (
 	FleetEndWarningProviderRenews = "provider_renews"
 	FleetEndWarningGracePeriod    = "grace_period"
+	FleetEndWarningPaymentPastDue = "payment_past_due"
 )
 
 const fleetCredentialEndedReason = registry.SuspendReasonCredentialEnded
@@ -138,6 +139,9 @@ func fleetCredentialEnd(metadata map[string]any, sample *subscriptionSample, now
 	if !sample.GracePeriodEnd.IsZero() {
 		until := FormatFleetEndsAt(sample.GracePeriodEnd)
 		end.Warnings = append(end.Warnings, FleetEndWarning{Code: FleetEndWarningGracePeriod, Until: &until})
+	}
+	if sample.claudePastDue() {
+		end.Warnings = append(end.Warnings, FleetEndWarning{Code: FleetEndWarningPaymentPastDue})
 	}
 	return end
 }

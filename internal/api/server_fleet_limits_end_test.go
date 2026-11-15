@@ -189,3 +189,25 @@ func TestFleetLimitsReportsProviderEndWarnings(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+func TestFleetLimitsReportsPaymentPastDue(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetClaudeProfileFetcher(func(context.Context, *coreauth.Auth, string) ([]byte, error) {
+		return []byte(`{"account":{"has_claude_max":true,"has_claude_pro":false},"organization":{"subscription_status":"past_due","subscription_created_at":"2026-10-07T21:09:56Z","organization_type":"claude_max"}}`), nil
+	})
+	auth := &coreauth.Auth{ID: "claude-past-due", Provider: "claude", Metadata: map[string]any{"access_token": "token"}}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatal(err)
+	}
+	if anchor := manager.LatestSubscriptionBillingAnchor(context.Background(), auth.ID); anchor.IsZero() {
+		t.Fatal("profile sample was not applied")
+	}
+	current, _ := manager.GetByID(auth.ID)
+	credential := fleetLimitsCredentialFor(current, nil, coreauth.FleetLimitsLabelKey(nil), time.Now())
+	if len(credential.EndWarnings) != 1 || credential.EndWarnings[0].Code != "payment_past_due" || credential.EndWarnings[0].Until != nil {
+		t.Fatalf("warnings = %+v; want payment_past_due", credential.EndWarnings)
+	}
+	if credential.EndState != "none" || credential.EndsAt != nil || !credential.usable {
+		t.Fatalf("past due credential = %+v; want usable without an end", credential)
+	}
+}
