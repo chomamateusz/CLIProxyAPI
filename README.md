@@ -248,14 +248,27 @@ For `use-or-lose`, `session-affinity` defaults to `true` only when the key is ab
 
 ### Credential end dates
 
-Providers publish no cancellation date, so a credential's subscription end is entered by hand and stored in its auth file as `fleet_ends_at` (RFC3339 UTC; it survives token refresh, re-save and restart):
+A credential's subscription end is stored in its auth file as `fleet_ends_at` (RFC3339 UTC) with `fleet_ends_at_source` (`manual`, `claude-anniversary`, `codex-api` or `plan-ended`) and, after a Claude cancel, `fleet_cancelled_at`. All three survive token refresh, re-save and restart; the source and cancel marker are read-only. Writes go through `PATCH /v8/management/credentials/fields`, one of these per request:
 
 ```sh
 curl -X PATCH -H "Authorization: Bearer $MANAGEMENT_KEY" -d '{"name":"claude-a.json","fleet_ends_at":"2026-12-12T23:00:00Z"}' http://host:8317/v8/management/credentials/fields
 curl -X PATCH -H "Authorization: Bearer $MANAGEMENT_KEY" -d '{"name":"claude-a.json","fleet_ends_at":null}' http://host:8317/v8/management/credentials/fields
+curl -X PATCH -H "Authorization: Bearer $MANAGEMENT_KEY" -d '{"name":"claude-a.json","fleet_cancelled":true}' http://host:8317/v8/management/credentials/fields
+curl -X PATCH -H "Authorization: Bearer $MANAGEMENT_KEY" -d '{"name":"claude-a.json","fleet_end_action":"next_period"}' http://host:8317/v8/management/credentials/fields
 ```
 
-Any RFC3339 offset is accepted and stored as UTC seconds; an unparsable value answers `400`. `GET /v8/management/credentials` lists `fleet_ends_at` and `fleet_ended` for credentials that have an end. From the end on, the credential is never selected for a request, its quota is no longer sampled and `/v1/fleet/limits` reports it as `ended`; models served only by ended credentials are no longer listed in `/v1/models` or the limits `models` list; clearing or moving the end date makes it eligible again immediately.
+- `fleet_ends_at` sets a manual end (any RFC3339 offset, stored as UTC seconds; an unparsable value answers `400`); `null` or `"fleet_cancelled":false` clears the end, its source and the cancel marker.
+- `"fleet_cancelled":true` (Claude) ends the credential at the next monthly anniversary of the profile's `subscription_created_at` strictly after now: same day of month and UTC time of day, a day the month lacks becoming its last day. The anchor comes from the latest profile sample, fetched on the spot when there is none; without one the request answers `400 {"error":"no_billing_anchor"}` and changes nothing. A later sample with a different anchor moves the end to the new anchor's nearest anniversary.
+- `"fleet_end_action":"next_period"` moves a manual end one month later (same day and time, clamped to the month's last day) and a billing-anniversary end to the following anniversary; other ends answer `400`.
+
+The proxy samples each enabled Claude credential's OAuth profile (`/api/oauth/profile`, through the login control-plane client) and each enabled Codex credential's `/backend-api/subscriptions`: staggered at startup, then every 6 hours, hourly when the end is within 48 hours or overdue. Samples stay in memory only and send no inference request; a failed or non-200 sample changes nothing.
+
+- A sample that shows no active paid plan (Claude: `subscription_status` is not `active`, or the organization is not Max, Pro or Team and the account has neither flag; Codex: `is_active` or `entitlement.has_active_subscription` is false) ends the credential at the sample time unless an earlier end is set, with source `plan-ended`. Missing fields count as unknown, never as inactive. The transition is logged with the observed subscription fields only.
+- Codex: `entitlement.cancels_at`, otherwise `active_until` (or `entitlement.expires_at`) when `will_renew` is false, becomes the end with source `codex-api`; once the provider reports `will_renew` true with no `cancels_at`, a `codex-api` end is cleared. A manual end is never overwritten by this rule.
+
+End states: `none`; `scheduled` (end in the future); `overdue` (a manual or billing-anniversary end has passed, and no sample taken after it shows the plan gone); `ended` (a `codex-api` or `plan-ended` end has passed, or a sample after the end shows no active paid plan). Only `ended` credentials are never selected, never quota-sampled and do not keep a model listed in `/v1/models` or the limits `models` list; they count as absent, so a model whose remaining credentials are only quota-cooled stays listed. `overdue` credentials keep routing and keep their drain priority.
+
+`GET /v8/management/credentials` lists `fleet_end_state`, `fleet_end_warnings` (`[{"code":"provider_renews"}]` for a manual end on a subscription the provider says renews, `[{"code":"grace_period","until":"…"}]` while a payment grace period runs), `fleet_billing_anchor` and `fleet_end_checked_at` (last successful provider sample) when known, and, for credentials with an end, `fleet_ends_at`, `fleet_ends_at_source`, `fleet_cancelled_at` and `fleet_ended` (true only in state `ended`).
 
 ### Key-issuer credentials
 
@@ -344,7 +357,7 @@ curl -H "Authorization: Bearer $CLIENT_KEY" http://host:8317/v1/fleet/limits
     {"pattern": "claude-fable-*", "provider": null, "source": "key-policy", "until": null, "until_source": null}
   ],
   "credentials": [{
-    "label": "claude-6cc0eb0c", "provider": "claude", "plan": null, "state": "active", "ends_at": null,
+    "label": "claude-6cc0eb0c", "provider": "claude", "plan": null, "state": "active", "ends_at": null, "end_state": "none", "ends_at_source": null, "end_warnings": [],
     "bars": [
       {"id": "weekly_all", "percent": 64, "status": "allowed", "resets_at": "2026-11-08T16:00:00Z", "sampled_at": "2026-11-03T19:00:00Z", "reset_passed": false},
       {"id": "weekly_fable", "percent": 100, "status": "rejected", "resets_at": "2026-11-08T16:00:00Z", "sampled_at": "2026-11-03T18:00:00Z", "reset_passed": false}
@@ -360,7 +373,7 @@ curl -H "Authorization: Bearer $CLIENT_KEY" http://host:8317/v1/fleet/limits
 ```
 
 - `models` is exactly what `/v1/models` lists for the key; `credentials` only lists credentials the key may use. `label` is the provider plus an opaque id (keyed by the management secret, random per process without one); it never contains an e-mail, account id or file name.
-- `state` is `ended` (at or past its end date), `disabled`, `cooldown` (credential-wide cooldown in force), `error` or `active`. `ends_at` is the credential's end date (RFC3339 UTC) or `null`. `cooldowns` are the timers still in force, as in management `auth-files`, minus model cooldowns of models the key may not use.
+- `state` is `ended` (end state `ended`, see Credential end dates), `disabled`, `cooldown` (credential-wide cooldown in force), `error` or `active`. `ends_at` is the credential's end date (RFC3339 UTC) or `null`, with `end_state`, `ends_at_source` and `end_warnings` as in the management list. `cooldowns` are the timers still in force, as in management `auth-files`, minus model cooldowns of models the key may not use.
 - Claude bars: `weekly_all` (`anthropic-ratelimit-unified-7d-*`), `weekly_fable` (`-7d_oi-*`, only sent with Fable responses), `session_5h` (only when the plan sends `-5h-*`; Ultra does not). Codex bars come from the primary and secondary windows (`10080` minutes is `weekly_all`, `300` is `session_5h`, others `window_<minutes>m`); Codex also gets `plan` and `credits`. Each bar uses the freshest stored response carrying it; `reset_passed` means the window rolled over since that sample.
 - `summary` is per provider over usable credentials (not ended, not disabled, no credential-wide cooldown): the lowest `percent` per bar, a rolled-over bar counting as `0`. For `session_5h` only, a credential with stored quota headers but no 5h window (Ultra) counts as `0`, since its plan has no 5h cap; a credential with no stored headers yet is left out of every bar, so `weekly_all` and `weekly_fable` only come from credentials that sent that window.
 - Stored quota headers live in memory only and are empty after a restart until the next upstream response; cooldowns survive a restart only with `save-cooldown-status: true`.

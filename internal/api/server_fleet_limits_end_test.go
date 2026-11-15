@@ -2,6 +2,9 @@ package api
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +20,7 @@ func fleetEndSampledAuth(id string, used string, endsAt time.Time) *coreauth.Aut
 	}}}
 	if !endsAt.IsZero() {
 		auth.Metadata[coreauth.MetadataFleetEndsAt] = coreauth.FormatFleetEndsAt(endsAt)
+		auth.Metadata[coreauth.MetadataFleetEndsAtSource] = coreauth.FleetEndSourceCodexAPI
 	}
 	return auth
 }
@@ -67,6 +71,7 @@ func TestFleetLimitsEndpointReportsEndsAt(t *testing.T) {
 		t.Fatal("max credential missing")
 	}
 	auth.Metadata[coreauth.MetadataFleetEndsAt] = "2026-11-01T00:00:00Z"
+	auth.Metadata[coreauth.MetadataFleetEndsAtSource] = coreauth.FleetEndSourcePlanEnded
 	if _, err := server.handlers.AuthManager.Update(context.Background(), auth); err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +86,7 @@ func TestFleetLimitsEndpointReportsEndsAt(t *testing.T) {
 		if endsAt == nil {
 			continue
 		}
-		if endsAt != "2026-11-01T00:00:00Z" || credential["state"] != "ended" {
+		if endsAt != "2026-11-01T00:00:00Z" || credential["state"] != "ended" || credential["end_state"] != "ended" || credential["ends_at_source"] != "plan-ended" {
 			t.Fatalf("ended credential = %v", credential)
 		}
 		ended++
@@ -96,7 +101,7 @@ func TestFleetLimitsEndpointReportsEndsAt(t *testing.T) {
 
 func TestFleetLimitsModelsOmitsModelOfEndedCredential(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
-	ended := &coreauth.Auth{ID: "fleet-limits-models/ended", Provider: "codex", Metadata: map[string]any{coreauth.MetadataFleetEndsAt: coreauth.FormatFleetEndsAt(time.Now().Add(-time.Minute))}}
+	ended := &coreauth.Auth{ID: "fleet-limits-models/ended", Provider: "codex", Metadata: map[string]any{coreauth.MetadataFleetEndsAt: coreauth.FormatFleetEndsAt(time.Now().Add(-time.Minute)), coreauth.MetadataFleetEndsAtSource: coreauth.FleetEndSourceCodexAPI}}
 	live := &coreauth.Auth{ID: "fleet-limits-models/live", Provider: "codex", Metadata: map[string]any{}}
 	reg := registry.GetGlobalRegistry()
 	for _, auth := range []*coreauth.Auth{ended, live} {
@@ -127,5 +132,60 @@ func TestFleetLimitsModelsOmitsModelOfEndedCredential(t *testing.T) {
 	}
 	if !listed()["fleet-limits-shared"] {
 		t.Fatal("fleetLimitsModels dropped a model a live credential still serves")
+	}
+}
+
+func TestFleetLimitsOverdueCredentialStaysUsable(t *testing.T) {
+	auth := fleetEndSampledAuth("overdue", "0.1", fleetNow.Add(-time.Hour))
+	auth.Metadata[coreauth.MetadataFleetEndsAtSource] = coreauth.FleetEndSourceManual
+	credential := fleetLimitsCredentialFor(auth, nil, coreauth.FleetLimitsLabelKey(nil), fleetNow)
+	if credential.State != "active" || credential.EndState != "overdue" || credential.EndsAtSource == nil || *credential.EndsAtSource != "manual" || !credential.usable || credential.EndWarnings == nil {
+		t.Fatalf("overdue credential = %+v", credential)
+	}
+	none := fleetLimitsCredentialFor(fleetEndSampledAuth("none", "0.1", time.Time{}), nil, coreauth.FleetLimitsLabelKey(nil), fleetNow)
+	if none.EndState != "none" || none.EndsAtSource != nil || none.EndsAt != nil || none.EndWarnings == nil {
+		t.Fatalf("credential without an end = %+v", none)
+	}
+}
+
+type fleetSubscriptionTransport string
+
+func (p fleetSubscriptionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Host != "chatgpt.com" || r.URL.Path != "/backend-api/subscriptions" {
+		return &http.Response{StatusCode: http.StatusNotFound, Body: http.NoBody, Header: make(http.Header)}, nil
+	}
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(p))), Header: make(http.Header)}, nil
+}
+
+func (p fleetSubscriptionTransport) RoundTripperFor(*coreauth.Auth) http.RoundTripper { return p }
+
+func TestFleetLimitsReportsProviderEndWarnings(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetRoundTripperProvider(fleetSubscriptionTransport(`{"will_renew":true,"is_active":true,"grace_period_end_timestamp":"2099-01-05T00:00:00Z","entitlement":{"cancels_at":null,"has_active_subscription":true}}`))
+	endsAt := coreauth.FormatFleetEndsAt(time.Now().Add(72 * time.Hour))
+	auth := &coreauth.Auth{ID: "codex-warned", Provider: "codex", Metadata: map[string]any{"access_token": "token", "account_id": "acct", coreauth.MetadataFleetEndsAt: endsAt, coreauth.MetadataFleetEndsAtSource: coreauth.FleetEndSourceManual}}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { cancel(); manager.StopAutoRefresh() })
+	manager.StartSubscriptionSampler(ctx)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		current, _ := manager.GetByID(auth.ID)
+		credential := fleetLimitsCredentialFor(current, nil, coreauth.FleetLimitsLabelKey(nil), time.Now())
+		if len(credential.EndWarnings) == 2 {
+			if credential.EndWarnings[0].Code != "provider_renews" || credential.EndWarnings[1].Code != "grace_period" || credential.EndWarnings[1].Until == nil || *credential.EndWarnings[1].Until != "2099-01-05T00:00:00Z" {
+				t.Fatalf("warnings = %+v", credential.EndWarnings)
+			}
+			if credential.EndState != "scheduled" || *credential.EndsAt != endsAt {
+				t.Fatalf("manual end changed by a renewing provider: %+v", credential)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("warnings never appeared: %+v", credential)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

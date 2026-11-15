@@ -292,6 +292,7 @@ func (b *Builder) Build() (*Service, error) {
 		appliedRoutingState: appliedRoutingState,
 		serverOptions:       append([]api.ServerOption(nil), b.serverOptions...),
 	}
+	coreManager.SetClaudeProfileFetcher(service.fetchClaudeProfile)
 	if b.postAuthHook != nil {
 		service.serverOptions = append(service.serverOptions, api.WithPostAuthHook(b.postAuthHook))
 	}

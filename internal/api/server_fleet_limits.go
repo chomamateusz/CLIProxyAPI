@@ -42,16 +42,19 @@ type fleetLimitsExclusion struct {
 }
 
 type fleetLimitsCredential struct {
-	Label     string                `json:"label"`
-	Provider  string                `json:"provider"`
-	Plan      *string               `json:"plan"`
-	State     string                `json:"state"`
-	EndsAt    *string               `json:"ends_at"`
-	Bars      []fleetLimitsBar      `json:"bars"`
-	Credits   *fleetLimitsCredits   `json:"credits,omitempty"`
-	Cooldowns []fleetLimitsCooldown `json:"cooldowns"`
-	usable    bool
-	sampled   bool
+	Label        string                     `json:"label"`
+	Provider     string                     `json:"provider"`
+	Plan         *string                    `json:"plan"`
+	State        string                     `json:"state"`
+	EndsAt       *string                    `json:"ends_at"`
+	EndState     string                     `json:"end_state"`
+	EndsAtSource *string                    `json:"ends_at_source"`
+	EndWarnings  []coreauth.FleetEndWarning `json:"end_warnings"`
+	Bars         []fleetLimitsBar           `json:"bars"`
+	Credits      *fleetLimitsCredits        `json:"credits,omitempty"`
+	Cooldowns    []fleetLimitsCooldown      `json:"cooldowns"`
+	usable       bool
+	sampled      bool
 }
 
 type fleetLimitsBar struct {
@@ -212,9 +215,16 @@ func fleetLimitsCredentialFor(auth *coreauth.Auth, policy *access.KeyPolicy, lab
 		credential.Cooldowns = append(credential.Cooldowns, cooldown)
 	}
 	disabled := auth.Disabled || auth.Status == coreauth.StatusDisabled
-	ended := coreauth.FleetCredentialEnded(auth, now)
-	if endsAt, ok := coreauth.FleetCredentialEndsAt(auth); ok {
-		credential.EndsAt = optionalTime(endsAt)
+	end := coreauth.FleetCredentialEndFor(auth, now)
+	ended := end.State == coreauth.FleetEndStateEnded
+	credential.EndState = string(end.State)
+	credential.EndWarnings = end.Warnings
+	if credential.EndWarnings == nil {
+		credential.EndWarnings = []coreauth.FleetEndWarning{}
+	}
+	if end.State != coreauth.FleetEndStateNone {
+		credential.EndsAt = optionalTime(end.EndsAt)
+		credential.EndsAtSource = &end.Source
 	}
 	switch {
 	case ended:

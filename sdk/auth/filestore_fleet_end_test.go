@@ -19,14 +19,14 @@ func TestFileTokenStoreKeepsFleetEndsAtOnRefreshSave(t *testing.T) {
 		refreshed := &cliproxyauth.Auth{
 			ID: "claude.json", FileName: "claude.json", Provider: "claude",
 			Storage:  &claude.ClaudeTokenStorage{AccessToken: "new", RefreshToken: "ref-new"},
-			Metadata: map[string]any{"type": "claude", "access_token": "new", cliproxyauth.MetadataFleetEndsAt: fleetEndFixture},
+			Metadata: map[string]any{"type": "claude", "access_token": "new", cliproxyauth.MetadataFleetEndsAt: fleetEndFixture, cliproxyauth.MetadataFleetEndsAtSource: cliproxyauth.FleetEndSourceClaudeAnniversary, cliproxyauth.MetadataFleetCancelledAt: "2026-11-15T10:00:00Z"},
 		}
 		store := NewFileTokenStore()
 		store.SetBaseDir(baseDir)
 		if _, err := store.Save(context.Background(), refreshed); err != nil {
 			t.Fatal(err)
 		}
-		if saved := readCodexRefreshFixture(t, path); saved[cliproxyauth.MetadataFleetEndsAt] != fleetEndFixture {
+		if saved := readCodexRefreshFixture(t, path); saved[cliproxyauth.MetadataFleetEndsAt] != fleetEndFixture || saved[cliproxyauth.MetadataFleetEndsAtSource] != cliproxyauth.FleetEndSourceClaudeAnniversary || saved[cliproxyauth.MetadataFleetCancelledAt] != "2026-11-15T10:00:00Z" {
 			t.Fatalf("refresh save dropped the end date: %#v", saved)
 		}
 	})
@@ -37,6 +37,7 @@ func TestFileTokenStoreKeepsFleetEndsAtOnRefreshSave(t *testing.T) {
 		base := codexRefreshFixture()
 		disk := base.Clone().Metadata
 		disk[cliproxyauth.MetadataFleetEndsAt] = fleetEndFixture
+		disk[cliproxyauth.MetadataFleetEndsAtSource] = cliproxyauth.FleetEndSourceCodexAPI
 		writeCodexRefreshFixture(t, path, disk)
 		updated := base.Clone()
 		updated.Metadata["access_token"] = "outer-new"
@@ -48,7 +49,7 @@ func TestFileTokenStoreKeepsFleetEndsAtOnRefreshSave(t *testing.T) {
 			t.Fatal(err)
 		}
 		saved := readCodexRefreshFixture(t, path)
-		if saved[cliproxyauth.MetadataFleetEndsAt] != fleetEndFixture || saved["access_token"] != "outer-new" {
+		if saved[cliproxyauth.MetadataFleetEndsAt] != fleetEndFixture || saved[cliproxyauth.MetadataFleetEndsAtSource] != cliproxyauth.FleetEndSourceCodexAPI || saved["access_token"] != "outer-new" {
 			t.Fatalf("refresh save dropped the end date: %#v", saved)
 		}
 		if endsAt, ok := cliproxyauth.FleetCredentialEndsAt(updated); !ok || cliproxyauth.FormatFleetEndsAt(endsAt) != fleetEndFixture {

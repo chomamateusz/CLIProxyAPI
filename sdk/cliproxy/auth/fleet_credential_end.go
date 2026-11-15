@@ -4,13 +4,53 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
-// Providers expose no cancellation date, so this value is only ever set by hand.
-const MetadataFleetEndsAt = "fleet_ends_at"
+const (
+	MetadataFleetEndsAt       = "fleet_ends_at"
+	MetadataFleetEndsAtSource = "fleet_ends_at_source"
+	MetadataFleetCancelledAt  = "fleet_cancelled_at"
+)
 
-// Must not be a quota reason: the registry keeps models of quota-suspended clients listed.
-const fleetCredentialEndedReason = "credential_ended"
+const (
+	FleetEndSourceManual            = "manual"
+	FleetEndSourceClaudeAnniversary = "claude-anniversary"
+	FleetEndSourceCodexAPI          = "codex-api"
+	FleetEndSourcePlanEnded         = "plan-ended"
+)
+
+type FleetEndState string
+
+const (
+	FleetEndStateNone      FleetEndState = "none"
+	FleetEndStateScheduled FleetEndState = "scheduled"
+	FleetEndStateOverdue   FleetEndState = "overdue"
+	FleetEndStateEnded     FleetEndState = "ended"
+)
+
+const (
+	FleetEndWarningProviderRenews = "provider_renews"
+	FleetEndWarningGracePeriod    = "grace_period"
+)
+
+const fleetCredentialEndedReason = registry.SuspendReasonCredentialEnded
+
+type FleetEndWarning struct {
+	Code  string  `json:"code"`
+	Until *string `json:"until,omitempty"`
+}
+
+type FleetCredentialEnd struct {
+	State         FleetEndState
+	EndsAt        time.Time
+	Source        string
+	CancelledAt   time.Time
+	Warnings      []FleetEndWarning
+	BillingAnchor time.Time
+	CheckedAt     time.Time
+}
 
 func ParseFleetEndsAt(raw string) (time.Time, error) {
 	endsAt, err := time.Parse(time.RFC3339, strings.TrimSpace(raw))
@@ -24,21 +64,90 @@ func FormatFleetEndsAt(endsAt time.Time) string {
 	return endsAt.UTC().Format(time.RFC3339)
 }
 
+func fleetMetadataTime(metadata map[string]any, key string) (time.Time, bool) {
+	raw, _ := metadata[key].(string)
+	if strings.TrimSpace(raw) == "" {
+		return time.Time{}, false
+	}
+	parsed, err := ParseFleetEndsAt(raw)
+	return parsed, err == nil
+}
+
 func FleetCredentialEndsAt(auth *Auth) (time.Time, bool) {
 	if auth == nil {
 		return time.Time{}, false
 	}
-	raw, _ := auth.Metadata[MetadataFleetEndsAt].(string)
-	if strings.TrimSpace(raw) == "" {
-		return time.Time{}, false
+	return fleetMetadataTime(auth.Metadata, MetadataFleetEndsAt)
+}
+
+func fleetEndSource(metadata map[string]any) string {
+	switch source, _ := metadata[MetadataFleetEndsAtSource].(string); source {
+	case FleetEndSourceClaudeAnniversary, FleetEndSourceCodexAPI, FleetEndSourcePlanEnded:
+		return source
+	default:
+		return FleetEndSourceManual
 	}
-	endsAt, err := ParseFleetEndsAt(raw)
-	return endsAt, err == nil
+}
+
+func providerConfirmsFleetEnd(source string) bool {
+	return source == FleetEndSourceCodexAPI || source == FleetEndSourcePlanEnded
+}
+
+func fleetEndState(metadata map[string]any, sample *subscriptionSample, now time.Time) (FleetEndState, time.Time) {
+	endsAt, ok := fleetMetadataTime(metadata, MetadataFleetEndsAt)
+	switch {
+	case !ok:
+		return FleetEndStateNone, time.Time{}
+	case now.Before(endsAt):
+		return FleetEndStateScheduled, endsAt
+	case providerConfirmsFleetEnd(fleetEndSource(metadata)):
+		return FleetEndStateEnded, endsAt
+	case sample != nil && !sample.SampledAt.Before(endsAt) && sample.paidPlan() == paidPlanInactive:
+		return FleetEndStateEnded, endsAt
+	default:
+		return FleetEndStateOverdue, endsAt
+	}
+}
+
+func FleetCredentialEndFor(auth *Auth, now time.Time) FleetCredentialEnd {
+	if auth == nil {
+		return FleetCredentialEnd{State: FleetEndStateNone}
+	}
+	return fleetCredentialEnd(auth.Metadata, auth.subscription, now)
+}
+
+func FleetCredentialEndFromMetadata(metadata map[string]any, now time.Time) FleetCredentialEnd {
+	return fleetCredentialEnd(metadata, nil, now)
+}
+
+func fleetCredentialEnd(metadata map[string]any, sample *subscriptionSample, now time.Time) FleetCredentialEnd {
+	end := FleetCredentialEnd{}
+	end.State, end.EndsAt = fleetEndState(metadata, sample, now)
+	if end.State != FleetEndStateNone {
+		end.Source = fleetEndSource(metadata)
+		end.CancelledAt, _ = fleetMetadataTime(metadata, MetadataFleetCancelledAt)
+	}
+	if sample == nil {
+		return end
+	}
+	end.CheckedAt = sample.SampledAt
+	end.BillingAnchor = sample.SubscriptionCreatedAt
+	if end.Source == FleetEndSourceManual && sample.renews() {
+		end.Warnings = append(end.Warnings, FleetEndWarning{Code: FleetEndWarningProviderRenews})
+	}
+	if !sample.GracePeriodEnd.IsZero() {
+		until := FormatFleetEndsAt(sample.GracePeriodEnd)
+		end.Warnings = append(end.Warnings, FleetEndWarning{Code: FleetEndWarningGracePeriod, Until: &until})
+	}
+	return end
 }
 
 func FleetCredentialEnded(auth *Auth, now time.Time) bool {
-	endsAt, ok := FleetCredentialEndsAt(auth)
-	return ok && !now.Before(endsAt)
+	if auth == nil {
+		return false
+	}
+	state, _ := fleetEndState(auth.Metadata, auth.subscription, now)
+	return state == FleetEndStateEnded
 }
 
 func nextFleetCredentialEnd(auths []*Auth, now time.Time) time.Time {

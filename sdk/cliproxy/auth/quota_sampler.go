@@ -139,6 +139,7 @@ func (s *quotaSampler) stop() {
 }
 
 func (m *Manager) quotaSamplerAuthChanged(a *Auth) {
+	m.subscriptionSamplerAuthChanged()
 	if m.quotaSampler == nil {
 		return
 	}
@@ -385,28 +386,11 @@ func (m *Manager) fetchQuotaSample(ctx context.Context, a *Auth) (http.Header, e
 			req.Header.Set("Chatgpt-Account-Id", id)
 		}
 	}
-	transportAuth := a.Clone()
-	if transportAuth.ProxyURL == "" {
-		if cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config); cfg != nil {
-			transportAuth.ProxyURL = cfg.ProxyURL
-		}
+	client, closeIdle, err := m.samplerHTTPClient(a)
+	if err != nil {
+		return nil, err
 	}
-	rt := m.roundTripperFor(transportAuth)
-	if rt == nil {
-		proxy := transportAuth.ProxyURL
-		if proxy == "" {
-			proxy = "direct"
-		}
-		transport, _, errTransport := proxyutil.BuildHTTPTransport(proxy)
-		if errTransport != nil {
-			return nil, errors.New("proxy configuration")
-		}
-		rt = transport
-		if transport != nil {
-			defer transport.CloseIdleConnections()
-		}
-	}
-	client := &http.Client{Transport: rt, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	defer closeIdle()
 	response, err := client.Do(req)
 	if err != nil {
 		return nil, errors.New("transport failure")
@@ -428,6 +412,33 @@ func (m *Manager) fetchQuotaSample(ctx context.Context, a *Auth) (http.Header, e
 		}
 	}
 	return headers, err
+}
+
+func (m *Manager) samplerHTTPClient(a *Auth) (*http.Client, func(), error) {
+	transportAuth := a.Clone()
+	if transportAuth.ProxyURL == "" {
+		if cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config); cfg != nil {
+			transportAuth.ProxyURL = cfg.ProxyURL
+		}
+	}
+	closeIdle := func() {}
+	rt := m.roundTripperFor(transportAuth)
+	if rt == nil {
+		proxy := transportAuth.ProxyURL
+		if proxy == "" {
+			proxy = "direct"
+		}
+		transport, _, errTransport := proxyutil.BuildHTTPTransport(proxy)
+		if errTransport != nil {
+			return nil, nil, errors.New("proxy configuration")
+		}
+		rt = transport
+		if transport != nil {
+			closeIdle = transport.CloseIdleConnections
+		}
+	}
+	client := &http.Client{Transport: rt, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return client, closeIdle, nil
 }
 
 func logQuotaSample(a *Auth, headers http.Header) {

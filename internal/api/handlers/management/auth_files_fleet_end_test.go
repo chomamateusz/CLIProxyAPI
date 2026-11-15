@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -102,16 +103,19 @@ func TestPatchFleetEndsAtSetsListsAndClears(t *testing.T) {
 	if got := f.onDisk(t)[coreauth.MetadataFleetEndsAt]; got != wantFuture {
 		t.Fatalf("stored %v; want %s", got, wantFuture)
 	}
-	if entry := f.listed(t); entry[coreauth.MetadataFleetEndsAt] != wantFuture || entry["fleet_ended"] != false {
-		t.Fatalf("listed %v / %v; want %s, not ended", entry[coreauth.MetadataFleetEndsAt], entry["fleet_ended"], wantFuture)
+	if entry := f.listed(t); entry[coreauth.MetadataFleetEndsAt] != wantFuture || entry["fleet_ended"] != false || entry["fleet_end_state"] != "scheduled" || entry["fleet_ends_at_source"] != "manual" {
+		t.Fatalf("listed %v; want %s, scheduled by hand", entry, wantFuture)
+	}
+	if got := f.onDisk(t)[coreauth.MetadataFleetEndsAtSource]; got != coreauth.FleetEndSourceManual {
+		t.Fatalf("stored source %v; want manual", got)
 	}
 
 	past := time.Now().Add(-3 * 24 * time.Hour).UTC().Format(time.RFC3339)
 	if rec := f.patch(t, `{"name":"claude-a.json","fleet_ends_at":"`+past+`"}`); rec.Code != http.StatusOK {
 		t.Fatalf("set past status = %d body=%s", rec.Code, rec.Body.String())
 	}
-	if entry := f.listed(t); entry[coreauth.MetadataFleetEndsAt] != past || entry["fleet_ended"] != true {
-		t.Fatalf("listed %v / %v; want %s, ended", entry[coreauth.MetadataFleetEndsAt], entry["fleet_ended"], past)
+	if entry := f.listed(t); entry[coreauth.MetadataFleetEndsAt] != past || entry["fleet_ended"] != false || entry["fleet_end_state"] != "overdue" {
+		t.Fatalf("listed %v; want %s, overdue", entry, past)
 	}
 
 	restarted := fileauth.NewFileTokenStore()
@@ -127,15 +131,15 @@ func TestPatchFleetEndsAtSetsListsAndClears(t *testing.T) {
 	if rec := f.patch(t, `{"name":"claude-a.json","fleet_ends_at":null}`); rec.Code != http.StatusOK {
 		t.Fatalf("clear status = %d body=%s", rec.Code, rec.Body.String())
 	}
-	if _, ok := f.onDisk(t)[coreauth.MetadataFleetEndsAt]; ok {
-		t.Fatal("cleared end date still stored")
+	if stored := f.onDisk(t); stored[coreauth.MetadataFleetEndsAt] != nil || stored[coreauth.MetadataFleetEndsAtSource] != nil {
+		t.Fatalf("cleared end still stored: %v", stored)
 	}
 	entry := f.listed(t)
 	if _, ok := entry[coreauth.MetadataFleetEndsAt]; ok {
 		t.Fatalf("cleared end date still listed: %v", entry)
 	}
-	if _, ok := entry["fleet_ended"]; ok {
-		t.Fatalf("fleet_ended listed without an end date: %v", entry)
+	if _, ok := entry["fleet_ended"]; ok || entry["fleet_end_state"] != "none" {
+		t.Fatalf("fleet end listed without an end date: %v", entry)
 	}
 	if current, _ := f.manager.GetByID("claude-a.json"); coreauth.FleetCredentialEnded(current, time.Now()) {
 		t.Fatal("runtime credential still ended after clearing")
@@ -165,7 +169,7 @@ func TestPatchFleetEndsAtRejectsInvalidValues(t *testing.T) {
 func TestListAuthFilesFromDiskShowsFleetEnd(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	authDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(authDir, "codex-a.json"), []byte(`{"type":"codex","fleet_ends_at":"2020-01-01T00:00:00+01:00"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(authDir, "codex-a.json"), []byte(`{"type":"codex","fleet_ends_at":"2020-01-01T00:00:00+01:00","fleet_ends_at_source":"codex-api"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
@@ -179,7 +183,133 @@ func TestListAuthFilesFromDiskShowsFleetEnd(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || len(body.Files) != 1 {
 		t.Fatalf("list body = %s, %v", rec.Body.String(), err)
 	}
-	if body.Files[0][coreauth.MetadataFleetEndsAt] != "2019-12-31T23:00:00Z" || body.Files[0]["fleet_ended"] != true {
+	if body.Files[0][coreauth.MetadataFleetEndsAt] != "2019-12-31T23:00:00Z" || body.Files[0]["fleet_ended"] != true || body.Files[0]["fleet_end_state"] != "ended" || body.Files[0]["fleet_ends_at_source"] != "codex-api" {
 		t.Fatalf("listed %v", body.Files[0])
+	}
+}
+
+type fleetProfileTransport struct {
+	body   string
+	status int
+	calls  int
+}
+
+func (p *fleetProfileTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	p.calls++
+	if r.URL.String() != "https://api.anthropic.com/api/oauth/profile" {
+		return &http.Response{StatusCode: http.StatusNotFound, Body: http.NoBody, Header: make(http.Header)}, nil
+	}
+	return &http.Response{StatusCode: p.status, Body: io.NopCloser(strings.NewReader(p.body)), Header: make(http.Header)}, nil
+}
+
+func (p *fleetProfileTransport) RoundTripperFor(*coreauth.Auth) http.RoundTripper { return p }
+
+func fleetProfile(createdAt string) *fleetProfileTransport {
+	return &fleetProfileTransport{status: http.StatusOK, body: `{"account":{"uuid":"u","has_claude_max":true},"organization":{"uuid":"o","subscription_status":"active","subscription_created_at":"` + createdAt + `","organization_type":"claude_max"}}`}
+}
+
+func nextAnniversaryOf(t *testing.T, anchor string, after time.Time) string {
+	t.Helper()
+	parsed, err := time.Parse(time.RFC3339, anchor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return coreauth.FormatFleetEndsAt(coreauth.NextBillingAnniversary(parsed, after))
+}
+
+func TestPatchFleetCancelledSetsBillingAnniversary(t *testing.T) {
+	f := newFleetEndFixture(t)
+	profile := fleetProfile("2026-10-07T21:09:56.274004Z")
+	f.manager.SetRoundTripperProvider(profile)
+
+	before := time.Now()
+	if rec := f.patch(t, `{"name":"claude-a.json","fleet_cancelled":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	want := nextAnniversaryOf(t, "2026-10-07T21:09:56Z", before)
+	stored := f.onDisk(t)
+	if stored[coreauth.MetadataFleetEndsAt] != want || stored[coreauth.MetadataFleetEndsAtSource] != coreauth.FleetEndSourceClaudeAnniversary || stored[coreauth.MetadataFleetCancelledAt] == nil {
+		t.Fatalf("stored %v; want end %s by billing anniversary with a cancel marker", stored, want)
+	}
+	entry := f.listed(t)
+	if entry["fleet_end_state"] != "scheduled" || entry["fleet_ends_at_source"] != "claude-anniversary" || entry["fleet_billing_anchor"] != "2026-10-07T21:09:56Z" || entry["fleet_end_checked_at"] == nil || entry["fleet_cancelled_at"] == nil {
+		t.Fatalf("listed %v", entry)
+	}
+	if warnings, ok := entry["fleet_end_warnings"].([]any); !ok || len(warnings) != 0 {
+		t.Fatalf("warnings = %#v; want an empty array", entry["fleet_end_warnings"])
+	}
+
+	if rec := f.patch(t, `{"name":"claude-a.json","fleet_end_action":"next_period"}`); rec.Code != http.StatusOK {
+		t.Fatalf("next period status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	endsAt, _ := time.Parse(time.RFC3339, want)
+	if got := f.onDisk(t)[coreauth.MetadataFleetEndsAt]; got != nextAnniversaryOf(t, "2026-10-07T21:09:56Z", endsAt) {
+		t.Fatalf("next period stored %v", got)
+	}
+	if profile.calls != 1 {
+		t.Fatalf("profile fetched %d times; want once, then reused", profile.calls)
+	}
+
+	if rec := f.patch(t, `{"name":"claude-a.json","fleet_cancelled":false}`); rec.Code != http.StatusOK {
+		t.Fatalf("uncancel status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	stored = f.onDisk(t)
+	for _, key := range []string{coreauth.MetadataFleetEndsAt, coreauth.MetadataFleetEndsAtSource, coreauth.MetadataFleetCancelledAt} {
+		if _, ok := stored[key]; ok {
+			t.Fatalf("uncancel kept %s: %v", key, stored)
+		}
+	}
+}
+
+func TestPatchFleetCancelledWithoutBillingAnchor(t *testing.T) {
+	for name, profile := range map[string]*fleetProfileTransport{
+		"profile without anchor": fleetProfile(""),
+		"profile refused":        {status: http.StatusForbidden, body: `{}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFleetEndFixture(t)
+			f.manager.SetRoundTripperProvider(profile)
+			rec := f.patch(t, `{"name":"claude-a.json","fleet_cancelled":true}`)
+			var payload map[string]any
+			if rec.Code != http.StatusBadRequest || json.Unmarshal(rec.Body.Bytes(), &payload) != nil || payload["error"] != "no_billing_anchor" {
+				t.Fatalf("status = %d body=%s; want 400 no_billing_anchor", rec.Code, rec.Body.String())
+			}
+			if stored := f.onDisk(t); stored[coreauth.MetadataFleetEndsAt] != nil || stored[coreauth.MetadataFleetCancelledAt] != nil {
+				t.Fatalf("rejected cancel changed the file: %v", stored)
+			}
+		})
+	}
+}
+
+func TestPatchFleetEndNextPeriodAndValidation(t *testing.T) {
+	f := newFleetEndFixture(t)
+	f.manager.SetRoundTripperProvider(&fleetProfileTransport{status: http.StatusForbidden})
+	if rec := f.patch(t, `{"name":"claude-a.json","fleet_end_action":"next_period"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("next period without an end: status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := f.patch(t, `{"name":"claude-a.json","fleet_ends_at":"2027-01-31T10:00:00Z"}`); rec.Code != http.StatusOK {
+		t.Fatalf("set status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := f.patch(t, `{"name":"claude-a.json","fleet_end_action":"next_period"}`); rec.Code != http.StatusOK {
+		t.Fatalf("manual next period status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if stored := f.onDisk(t); stored[coreauth.MetadataFleetEndsAt] != "2027-02-28T10:00:00Z" || stored[coreauth.MetadataFleetEndsAtSource] != coreauth.FleetEndSourceManual {
+		t.Fatalf("manual next period stored %v", stored)
+	}
+	for _, body := range []string{
+		`{"name":"claude-a.json","fleet_cancelled":"yes"}`,
+		`{"name":"claude-a.json","fleet_cancelled":null}`,
+		`{"name":"claude-a.json","fleet_end_action":"later"}`,
+		`{"name":"claude-a.json","fleet_ends_at_source":"codex-api"}`,
+		`{"name":"claude-a.json","fleet_cancelled_at":"2026-11-01T00:00:00Z"}`,
+		`{"name":"claude-a.json","fleet_cancelled":false,"fleet_ends_at":"2027-01-01T00:00:00Z"}`,
+		`{"name":"claude-a.json","fleet_cancelled.at":true}`,
+	} {
+		if rec := f.patch(t, body); rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status = %d body=%s; want 400", body, rec.Code, rec.Body.String())
+		}
+	}
+	if stored := f.onDisk(t); stored[coreauth.MetadataFleetEndsAt] != "2027-02-28T10:00:00Z" {
+		t.Fatalf("rejected patches changed the end: %v", stored)
 	}
 }

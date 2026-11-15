@@ -31,14 +31,14 @@ func TestParseFleetEndsAtNormalisesToUTCSeconds(t *testing.T) {
 func TestFleetCredentialEndedAtBoundary(t *testing.T) {
 	t.Parallel()
 	end := time.Date(2026, 12, 12, 23, 0, 0, 0, time.UTC)
-	auth := &Auth{Metadata: map[string]any{MetadataFleetEndsAt: FormatFleetEndsAt(end)}}
+	auth := &Auth{Metadata: map[string]any{MetadataFleetEndsAt: FormatFleetEndsAt(end), MetadataFleetEndsAtSource: FleetEndSourcePlanEnded}}
 	if FleetCredentialEnded(auth, end.Add(-time.Second)) {
 		t.Fatal("ended one second before the end")
 	}
 	if !FleetCredentialEnded(auth, end) || !FleetCredentialEnded(auth, end.Add(time.Hour)) {
 		t.Fatal("not ended at or after the end")
 	}
-	for _, metadata := range []map[string]any{nil, {}, {MetadataFleetEndsAt: nil}, {MetadataFleetEndsAt: ""}, {MetadataFleetEndsAt: "garbage"}, {MetadataFleetEndsAt: 123}} {
+	for _, metadata := range []map[string]any{nil, {}, {MetadataFleetEndsAt: nil}, {MetadataFleetEndsAt: ""}, {MetadataFleetEndsAt: "garbage"}, {MetadataFleetEndsAt: 123}, {MetadataFleetEndsAt: FormatFleetEndsAt(end)}} {
 		if FleetCredentialEnded(&Auth{Metadata: metadata}, end.Add(time.Hour)) {
 			t.Fatalf("metadata %#v counted as ended", metadata)
 		}
@@ -49,6 +49,7 @@ func fleetEndAuth(id, provider string, endsAt time.Time) *Auth {
 	auth := &Auth{ID: id, Provider: provider, Metadata: map[string]any{}}
 	if !endsAt.IsZero() {
 		auth.Metadata[MetadataFleetEndsAt] = FormatFleetEndsAt(endsAt)
+		auth.Metadata[MetadataFleetEndsAtSource] = FleetEndSourceCodexAPI
 	}
 	return auth
 }
@@ -139,11 +140,12 @@ func TestUseOrLoseDrainsEndingCredential(t *testing.T) {
 		{"switch off ranks by reset only", false, 24 * time.Hour, "steady"},
 		{"end after the reset changes nothing", true, 6 * 24 * time.Hour, "steady"},
 		{"end inside the steady tie hour prefers lower use", true, 3*24*time.Hour + 30*time.Minute, "steady"},
+		{"overdue end keeps drain priority", true, -time.Hour, "ending"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			steady := useOrLoseTestAuth("steady", now, 3*24*time.Hour, .5)
 			ending := useOrLoseTestAuth("ending", now, 5*24*time.Hour, .6)
-			ending.Metadata = map[string]any{MetadataFleetEndsAt: FormatFleetEndsAt(now.Add(tc.endIn))}
+			ending.Metadata = map[string]any{MetadataFleetEndsAt: FormatFleetEndsAt(now.Add(tc.endIn)), MetadataFleetEndsAtSource: FleetEndSourceManual}
 			selector := &UseOrLoseSelector{ShortWindowCapPct: 95, DrainEndingCredentials: tc.drain}
 			got, err := selector.pick(context.Background(), "claude", "claude-opus-5-5", []*Auth{steady, ending}, now)
 			if err != nil || got.ID != tc.want {
@@ -166,11 +168,11 @@ func TestUpdateUseOrLoseSelectorCarriesDrainSwitch(t *testing.T) {
 
 func TestMergeRefreshedAuthKeepsFleetEndsAt(t *testing.T) {
 	t.Parallel()
-	base := &Auth{ID: "c", Provider: "claude", Metadata: map[string]any{"access_token": "old", MetadataFleetEndsAt: "2026-12-12T23:00:00Z"}}
+	base := &Auth{ID: "c", Provider: "claude", Metadata: map[string]any{"access_token": "old", MetadataFleetEndsAt: "2026-12-12T23:00:00Z", MetadataFleetEndsAtSource: FleetEndSourceClaudeAnniversary, MetadataFleetCancelledAt: "2026-11-15T10:00:00Z"}}
 	updated := base.Clone()
 	updated.Metadata["access_token"] = "new"
 	merged := MergeRefreshedAuth(base, base.Clone(), updated)
-	if merged.Metadata[MetadataFleetEndsAt] != "2026-12-12T23:00:00Z" || merged.Metadata["access_token"] != "new" {
+	if merged.Metadata[MetadataFleetEndsAt] != "2026-12-12T23:00:00Z" || merged.Metadata[MetadataFleetEndsAtSource] != FleetEndSourceClaudeAnniversary || merged.Metadata[MetadataFleetCancelledAt] != "2026-11-15T10:00:00Z" || merged.Metadata["access_token"] != "new" {
 		t.Fatalf("refresh merge metadata = %#v", merged.Metadata)
 	}
 	editedDuringRefresh := base.Clone()
