@@ -8,8 +8,13 @@ func daysInMonth(year int, month time.Month) int {
 
 func billingAnniversary(anchor time.Time, months int) time.Time {
 	anchor = anchor.UTC().Truncate(time.Second)
-	monthStart := time.Date(anchor.Year(), anchor.Month()+time.Month(months), 1, anchor.Hour(), anchor.Minute(), anchor.Second(), 0, time.UTC)
-	day := min(anchor.Day(), daysInMonth(monthStart.Year(), monthStart.Month()))
+	return monthlyOnDay(anchor, anchor.Day(), months)
+}
+
+func monthlyOnDay(at time.Time, day, months int) time.Time {
+	at = at.UTC().Truncate(time.Second)
+	monthStart := time.Date(at.Year(), at.Month()+time.Month(months), 1, at.Hour(), at.Minute(), at.Second(), 0, time.UTC)
+	day = min(day, daysInMonth(monthStart.Year(), monthStart.Month()))
 	return monthStart.AddDate(0, 0, day-1)
 }
 

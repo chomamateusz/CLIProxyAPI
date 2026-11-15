@@ -133,6 +133,9 @@ func (s *subscriptionSample) paidPlan() paidPlanActivity {
 const claudeStatusPastDue = "past_due"
 
 func (s *subscriptionSample) claudePaidPlan() paidPlanActivity {
+	if s.claudeExplicitlyNotPaid() {
+		return paidPlanInactive
+	}
 	if s.claudeStatusKnown {
 		switch s.SubscriptionStatus {
 		case "active", "trialing", claudeStatusPastDue:
@@ -141,14 +144,11 @@ func (s *subscriptionSample) claudePaidPlan() paidPlanActivity {
 			return paidPlanInactive
 		}
 	}
-	if s.claudeExplicitlyNotPaid() {
-		return paidPlanInactive
-	}
 	return paidPlanUnknown
 }
 
 func (s *subscriptionSample) claudePastDue() bool {
-	return s.Provider == "claude" && s.claudeStatusKnown && s.SubscriptionStatus == claudeStatusPastDue
+	return s.Provider == "claude" && s.claudeStatusKnown && s.SubscriptionStatus == claudeStatusPastDue && !s.claudeExplicitlyNotPaid()
 }
 
 func (s *subscriptionSample) claudeExplicitlyNotPaid() bool {

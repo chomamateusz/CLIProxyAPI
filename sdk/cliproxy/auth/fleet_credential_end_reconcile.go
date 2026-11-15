@@ -151,9 +151,21 @@ func recomputedAnniversaryEnd(metadata map[string]any, anchor, currentEnd time.T
 }
 
 func periodMovesSinceCancel(currentEnd, cancelledAt time.Time) int {
+	day := billingDayBehind(currentEnd)
 	moves := 0
-	for billingAnniversary(currentEnd, -(moves + 1)).After(cancelledAt) {
+	for monthlyOnDay(currentEnd, day, -(moves + 1)).After(cancelledAt) {
 		moves++
 	}
 	return moves
+}
+
+// The previous anchor is not stored, so a month-end end is read as clamped from
+// the 31st: when that guess is wrong it keeps a paid month the sampler can still
+// end, where the other guess would drop a month the owner added.
+func billingDayBehind(end time.Time) int {
+	end = end.UTC()
+	if end.Day() == daysInMonth(end.Year(), end.Month()) {
+		return 31
+	}
+	return end.Day()
 }

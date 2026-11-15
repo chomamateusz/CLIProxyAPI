@@ -105,10 +105,11 @@ func TestPaidPlanActivity(t *testing.T) {
 		{"claude team", "claude", claudeProfileBody("active", "", "claude_team_standard"), paidPlanActive},
 		{"claude flag only", "claude", `{"account":{"has_claude_max":true},"organization":{"subscription_status":"active","organization_type":"other"}}`, paidPlanActive},
 		{"claude cancelled", "claude", claudeProfileBody("canceled", "", "claude_max"), paidPlanInactive},
-		{"claude active status wins over free flags", "claude", claudeProfileBody("active", "", "claude_free"), paidPlanActive},
+		{"claude free flags win over active status", "claude", claudeProfileBody("active", "", "claude_free"), paidPlanInactive},
+		{"claude free flags win over trialing status", "claude", claudeProfileBody("trialing", "", "claude_free"), paidPlanInactive},
 		{"claude trialing", "claude", claudeProfileBody("trialing", "", "claude_max"), paidPlanActive},
 		{"claude past due", "claude", claudeProfileBody("past_due", "", "claude_max"), paidPlanActive},
-		{"claude past due with free flags", "claude", claudeProfileBody("past_due", "", "claude_free"), paidPlanActive},
+		{"claude past due with free flags", "claude", claudeProfileBody("past_due", "", "claude_free"), paidPlanInactive},
 		{"claude unpaid", "claude", claudeProfileBody("unpaid", "", "claude_max"), paidPlanInactive},
 		{"claude incomplete expired", "claude", claudeProfileBody("incomplete_expired", "", "claude_max"), paidPlanInactive},
 		{"claude paused", "claude", claudeProfileBody("paused", "", "claude_max"), paidPlanInactive},
@@ -212,6 +213,10 @@ func TestFleetEndWarnings(t *testing.T) {
 			t.Fatalf("past due warnings with %v = %+v; want payment_past_due", metadata, warned.Warnings)
 		}
 	}
+	freePastDue := mustSample(t, "claude", claudeProfileBody("past_due", "2026-10-07T21:09:56Z", "claude_free"), now)
+	if got := fleetCredentialEnd(map[string]any{}, freePastDue, now).Warnings; len(got) != 0 {
+		t.Fatalf("past due free account warnings = %+v; want none", got)
+	}
 	active := mustSample(t, "claude", claudeProfileBody("active", "2026-10-07T21:09:56Z", "claude_max"), now)
 	if got := fleetCredentialEnd(map[string]any{}, active, now).Warnings; len(got) != 0 {
 		t.Fatalf("active claude warnings = %+v; want none", got)
@@ -244,6 +249,10 @@ func TestReconcileFleetEnd(t *testing.T) {
 		{"past due claude keeps a later manual end", endMetadata(later, FleetEndSourceManual), "claude", claudeProfileBody("past_due", "", "claude_max"), false, FormatFleetEndsAt(later), FleetEndSourceManual},
 		{"active claude clears a plan-ended end", endMetadata(earlier, FleetEndSourcePlanEnded), "claude", claudeProfileBody("active", "", "claude_max"), true, "", ""},
 		{"past due claude clears a plan-ended end", endMetadata(earlier, FleetEndSourcePlanEnded), "claude", claudeProfileBody("past_due", "", "claude_max"), true, "", ""},
+		{"active status with free flags keeps a plan-ended end", endMetadata(earlier, FleetEndSourcePlanEnded), "claude", claudeProfileBody("active", "", "claude_free"), false, FormatFleetEndsAt(earlier), FleetEndSourcePlanEnded},
+		{"trialing status with free flags keeps a plan-ended end", endMetadata(earlier, FleetEndSourcePlanEnded), "claude", claudeProfileBody("trialing", "", "claude_free"), false, FormatFleetEndsAt(earlier), FleetEndSourcePlanEnded},
+		{"past due status with free flags keeps a plan-ended end", endMetadata(earlier, FleetEndSourcePlanEnded), "claude", claudeProfileBody("past_due", "", "claude_free"), false, FormatFleetEndsAt(earlier), FleetEndSourcePlanEnded},
+		{"active status with free flags ends a credential", map[string]any{}, "claude", claudeProfileBody("active", "", "claude_free"), true, FormatFleetEndsAt(now), FleetEndSourcePlanEnded},
 		{"unknown claude keeps a plan-ended end", endMetadata(earlier, FleetEndSourcePlanEnded), "claude", `{}`, false, FormatFleetEndsAt(earlier), FleetEndSourcePlanEnded},
 		{"active codex clears a plan-ended end", endMetadata(earlier, FleetEndSourcePlanEnded), "codex", `{"is_active":true,"entitlement":{"has_active_subscription":true}}`, true, "", ""},
 		{"half active codex keeps a plan-ended end", endMetadata(earlier, FleetEndSourcePlanEnded), "codex", `{"is_active":true}`, false, FormatFleetEndsAt(earlier), FleetEndSourcePlanEnded},
@@ -330,6 +339,27 @@ func TestReconcileClaudeAnniversaryFromCancel(t *testing.T) {
 		}
 		_, changed := reconcileFleetEnd(metadata, mustSample(t, "claude", claudeProfileBody("active", tc.anchor, "claude_max"), now))
 		if !changed || metadata[MetadataFleetEndsAt] != tc.want {
+			t.Errorf("%s: changed %t end %v; want %s", tc.name, changed, metadata[MetadataFleetEndsAt], tc.want)
+		}
+	}
+}
+
+func TestReconcileClaudeAnniversaryAfterMonthEndNextPeriod(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, oldAnchor, cancelledAt, newAnchor, wantCancelEnd, wantMovedEnd, want string }{
+		{"31st anchor cancelled on the 30th", "2026-01-31T10:00:00Z", "2026-03-30T12:00:00Z", "2026-02-05T10:00:00Z", "2026-03-31T10:00:00Z", "2026-04-30T10:00:00Z", "2026-05-05T10:00:00Z"},
+		{"31st anchor cancelled in February", "2026-01-31T10:00:00Z", "2026-02-10T12:00:00Z", "2026-02-05T10:00:00Z", "2026-02-28T10:00:00Z", "2026-03-31T10:00:00Z", "2026-04-05T10:00:00Z"},
+	} {
+		cancelledAt := endTime(t, tc.cancelledAt)
+		metadata := map[string]any{}
+		if err := CancelAtBillingAnniversary(metadata, endTime(t, tc.oldAnchor), cancelledAt); err != nil || metadata[MetadataFleetEndsAt] != tc.wantCancelEnd {
+			t.Fatalf("%s: cancel = %v, %v; want %s", tc.name, err, metadata, tc.wantCancelEnd)
+		}
+		if err := MoveFleetEndToNextPeriod(metadata, endTime(t, tc.oldAnchor)); err != nil || metadata[MetadataFleetEndsAt] != tc.wantMovedEnd {
+			t.Fatalf("%s: next period = %v, %v; want %s", tc.name, err, metadata, tc.wantMovedEnd)
+		}
+		sample := mustSample(t, "claude", claudeProfileBody("active", tc.newAnchor, "claude_max"), cancelledAt.Add(time.Hour))
+		if _, changed := reconcileFleetEnd(metadata, sample); !changed || metadata[MetadataFleetEndsAt] != tc.want {
 			t.Errorf("%s: changed %t end %v; want %s", tc.name, changed, metadata[MetadataFleetEndsAt], tc.want)
 		}
 	}
