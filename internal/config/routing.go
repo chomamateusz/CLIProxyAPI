@@ -10,7 +10,12 @@ import (
 const DefaultUseOrLoseShortWindowCapPct = 95
 
 type UseOrLoseConfig struct {
-	ShortWindowCapPct float64 `yaml:"short-window-cap-pct,omitempty" json:"short-window-cap-pct,omitempty"`
+	ShortWindowCapPct      float64 `yaml:"short-window-cap-pct,omitempty" json:"short-window-cap-pct,omitempty"`
+	DrainEndingCredentials *bool   `yaml:"drain-ending-credentials,omitempty" json:"drain-ending-credentials,omitempty"`
+}
+
+func (c UseOrLoseConfig) EffectiveDrainEndingCredentials() bool {
+	return c.DrainEndingCredentials == nil || *c.DrainEndingCredentials
 }
 
 func (c UseOrLoseConfig) EffectiveShortWindowCapPct() float64 {

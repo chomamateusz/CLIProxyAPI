@@ -233,6 +233,7 @@ routing:
   session-affinity: true
   use-or-lose:
     short-window-cap-pct: 95
+    drain-ending-credentials: true
 ```
 
 For `use-or-lose`, `session-affinity` defaults to `true` only when the key is absent, including when switching via `PUT routing/strategy`. An explicit `false`, including one previously written by the management panel, is respected and opts into per-request ranking. Set it to `true` or remove the key to enable affinity. Other strategies keep their existing defaults. The config watcher applies this without a restart. Roll back the routing policy by setting `routing.strategy` to `nearest-reset` (restore the previous session-affinity setting if changed). The other strategies retain their existing behaviour.
@@ -240,9 +241,21 @@ For `use-or-lose`, `session-affinity` defaults to `true` only when the key is ab
 - Rank by the all-model weekly reset, or the Fable weekly reset for Fable requests when a usable Fable weekly reading exists (utilisation present, reset still in the future and observation less than seven days old). Otherwise, use the all-model weekly window. A Fable weekly window can come from an earlier Fable response even if the newest response is for Opus. Codex uses its primary or secondary seven-day window, not its five-hour reset.
 - Capacity has three tiers: credentials with room in both windows first, five-hour-capped credentials with weekly capacity second, and weekly-limited credentials last. The five-hour cap is `routing.use-or-lose.short-window-cap-pct` (default 95; valid range greater than 1 through 100; omitted or invalid values use 95). A binding weekly window at 100% or with status `rejected` is weekly-limited, even if its five-hour window has room. Each limit is ignored after its reset. If every eligible credential is weekly-limited, use the normal weekly ranking within that tier; quota headers alone never exclude every credential or trigger an extra upstream call.
 - Among resets within one hour of the earliest reset, prefer lower utilisation; equal utilisation prefers the earlier reset, then existing input order. Anchoring the tie group to the earliest reset avoids inconsistent pairwise comparisons across three or more accounts.
+- With `routing.use-or-lose.drain-ending-credentials` (default `true`; management path `/v8/management/config/routing/use-or-lose/drain-ending-credentials`), a credential with an end date ranks by the earlier of its weekly reset and that end date, so its quota is spent before the subscription ends. `false` ranks by the weekly reset only.
 - Disabled credentials, model exclusions, per-key credential policies and backend cooldowns retain their existing eligibility rules. Existing credential priorities and Codex websocket preference apply within the capacity tier.
 - Missing, invalid or expired weekly samples start behind valid samples. After one minute in the eligible ranking pool, each unsampled Claude or Codex credential gets a normal request as a probe, including on mixed-provider request paths, oldest due first, at most once per minute per credential and model family (Fable versus other models). With N due credentials and continuing traffic, all get an attempt within the next N selections. No traffic means no probe; a response without quota headers cannot create a sample. Unsupported providers keep fill-first order.
 - Session affinity retains a healthy bound credential even when another credential has an earlier weekly reset. A five-hour cap or weekly limit moves the binding when a better capacity tier is available; model exclusion, quota or auth failures also trigger normal use-or-lose ranking and rebinding, including with `session-affinity-rebind-on: quota`. Once the original credential recovers from those conditions, the session stays on its current healthy credential; it can move back only at a natural boundary (a new or expired session binding, or another required re-rank). A recoverable transient cooldown after a 5xx or network error instead fails over without rebinding, both on retries and on subsequent requests during the cooldown, provided the bound credential is otherwise eligible and has room in both windows. After that cooldown expires, the session returns to its original credential. Weekly ranking and unsampled probes run only at selection boundaries, not on healthy affinity hits; the bounded probe guarantee applies to fallback selections, not every request.
+
+### Credential end dates
+
+Providers publish no cancellation date, so a credential's subscription end is entered by hand and stored in its auth file as `fleet_ends_at` (RFC3339 UTC; it survives token refresh, re-save and restart):
+
+```sh
+curl -X PATCH -H "Authorization: Bearer $MANAGEMENT_KEY" -d '{"name":"claude-a.json","fleet_ends_at":"2026-12-12T23:00:00Z"}' http://host:8317/v8/management/credentials/fields
+curl -X PATCH -H "Authorization: Bearer $MANAGEMENT_KEY" -d '{"name":"claude-a.json","fleet_ends_at":null}' http://host:8317/v8/management/credentials/fields
+```
+
+Any RFC3339 offset is accepted and stored as UTC seconds; an unparsable value answers `400`. `GET /v8/management/credentials` lists `fleet_ends_at` and `fleet_ended` for credentials that have an end. From the end on, the credential is never selected for a request, its quota is no longer sampled and `/v1/fleet/limits` reports it as `ended`; clearing or moving the end date makes it eligible again immediately.
 
 ### Key-issuer credentials
 
@@ -331,7 +344,7 @@ curl -H "Authorization: Bearer $CLIENT_KEY" http://host:8317/v1/fleet/limits
     {"pattern": "claude-fable-*", "provider": null, "source": "key-policy", "until": null, "until_source": null}
   ],
   "credentials": [{
-    "label": "claude-6cc0eb0c", "provider": "claude", "plan": null, "state": "active",
+    "label": "claude-6cc0eb0c", "provider": "claude", "plan": null, "state": "active", "ends_at": null,
     "bars": [
       {"id": "weekly_all", "percent": 64, "status": "allowed", "resets_at": "2026-11-08T16:00:00Z", "sampled_at": "2026-11-03T19:00:00Z", "reset_passed": false},
       {"id": "weekly_fable", "percent": 100, "status": "rejected", "resets_at": "2026-11-08T16:00:00Z", "sampled_at": "2026-11-03T18:00:00Z", "reset_passed": false}
@@ -347,9 +360,9 @@ curl -H "Authorization: Bearer $CLIENT_KEY" http://host:8317/v1/fleet/limits
 ```
 
 - `models` is exactly what `/v1/models` lists for the key; `credentials` only lists credentials the key may use. `label` is the provider plus an opaque id (keyed by the management secret, random per process without one); it never contains an e-mail, account id or file name.
-- `state` is `disabled`, `cooldown` (credential-wide cooldown in force), `error` or `active`. `cooldowns` are the timers still in force, as in management `auth-files`, minus model cooldowns of models the key may not use.
+- `state` is `ended` (at or past its end date), `disabled`, `cooldown` (credential-wide cooldown in force), `error` or `active`. `ends_at` is the credential's end date (RFC3339 UTC) or `null`. `cooldowns` are the timers still in force, as in management `auth-files`, minus model cooldowns of models the key may not use.
 - Claude bars: `weekly_all` (`anthropic-ratelimit-unified-7d-*`), `weekly_fable` (`-7d_oi-*`, only sent with Fable responses), `session_5h` (only when the plan sends `-5h-*`; Ultra does not). Codex bars come from the primary and secondary windows (`10080` minutes is `weekly_all`, `300` is `session_5h`, others `window_<minutes>m`); Codex also gets `plan` and `credits`. Each bar uses the freshest stored response carrying it; `reset_passed` means the window rolled over since that sample.
-- `summary` is per provider over usable credentials (not disabled, no credential-wide cooldown): the lowest `percent` per bar, a rolled-over bar counting as `0`. For `session_5h` only, a credential with stored quota headers but no 5h window (Ultra) counts as `0`, since its plan has no 5h cap; a credential with no stored headers yet is left out of every bar, so `weekly_all` and `weekly_fable` only come from credentials that sent that window.
+- `summary` is per provider over usable credentials (not ended, not disabled, no credential-wide cooldown): the lowest `percent` per bar, a rolled-over bar counting as `0`. For `session_5h` only, a credential with stored quota headers but no 5h window (Ultra) counts as `0`, since its plan has no 5h cap; a credential with no stored headers yet is left out of every bar, so `weekly_all` and `weekly_fable` only come from credentials that sent that window.
 - Stored quota headers live in memory only and are empty after a restart until the next upstream response; cooldowns survive a restart only with `save-cooldown-status: true`.
 
 ### Excluded models

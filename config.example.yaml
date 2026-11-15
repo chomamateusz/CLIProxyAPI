@@ -174,6 +174,7 @@ routing:
   session-affinity: true # use-or-lose default: true; other strategies default: false
   use-or-lose:
     short-window-cap-pct: 95 # Percent (1 < value <= 100), not a fraction; invalid values use 95.
+    drain-ending-credentials: true # Default true: a credential with fleet_ends_at counts that end as its binding reset, so its quota is spent first.
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
   # When true (default), subagents (child sessions with parent references) inherit and bind

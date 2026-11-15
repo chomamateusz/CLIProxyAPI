@@ -156,7 +156,7 @@ func (m *Manager) wakeQuotaSampler() {
 }
 
 func quotaSampleEligible(a *Auth) bool {
-	if a == nil || a.Disabled || a.Status == StatusDisabled || IsConfigAPIKeyAuth(a) || IsPluginVirtualAuth(a) || authAccessToken(a) == "" {
+	if a == nil || a.Disabled || a.Status == StatusDisabled || FleetCredentialEnded(a, time.Now()) || IsConfigAPIKeyAuth(a) || IsPluginVirtualAuth(a) || authAccessToken(a) == "" {
 		return false
 	}
 	provider := strings.ToLower(strings.TrimSpace(a.Provider))

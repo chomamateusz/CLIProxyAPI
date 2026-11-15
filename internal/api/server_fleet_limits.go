@@ -46,6 +46,7 @@ type fleetLimitsCredential struct {
 	Provider  string                `json:"provider"`
 	Plan      *string               `json:"plan"`
 	State     string                `json:"state"`
+	EndsAt    *string               `json:"ends_at"`
 	Bars      []fleetLimitsBar      `json:"bars"`
 	Credits   *fleetLimitsCredits   `json:"credits,omitempty"`
 	Cooldowns []fleetLimitsCooldown `json:"cooldowns"`
@@ -211,7 +212,13 @@ func fleetLimitsCredentialFor(auth *coreauth.Auth, policy *access.KeyPolicy, lab
 		credential.Cooldowns = append(credential.Cooldowns, cooldown)
 	}
 	disabled := auth.Disabled || auth.Status == coreauth.StatusDisabled
+	ended := coreauth.FleetCredentialEnded(auth, now)
+	if endsAt, ok := coreauth.FleetCredentialEndsAt(auth); ok {
+		credential.EndsAt = optionalTime(endsAt)
+	}
 	switch {
+	case ended:
+		credential.State = "ended"
 	case disabled:
 		credential.State = "disabled"
 	case credentialCooldown:
@@ -239,7 +246,7 @@ func fleetLimitsCredentialFor(auth *coreauth.Auth, policy *access.KeyPolicy, lab
 			credential.Credits = &fleetLimitsCredits{HasCredits: limits.Credits.HasCredits, Unlimited: limits.Credits.Unlimited, Balance: limits.Credits.Balance}
 		}
 	}
-	credential.usable = !disabled && !credentialCooldown
+	credential.usable = !ended && !disabled && !credentialCooldown
 	return credential
 }
 

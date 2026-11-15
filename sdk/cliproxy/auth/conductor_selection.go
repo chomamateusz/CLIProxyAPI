@@ -115,7 +115,7 @@ func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecut
 }
 
 func (e authSelectionEligibility) allows(auth *Auth) bool {
-	if auth == nil {
+	if auth == nil || FleetCredentialEnded(auth, time.Now()) {
 		return false
 	}
 	if e.credentialFilter != nil && !e.credentialFilter(auth) {
@@ -1125,8 +1125,9 @@ func (m *Manager) AvailableProviders() []string {
 	defer m.mu.RUnlock()
 	seen := make(map[string]struct{}, len(m.auths))
 	out := make([]string, 0, len(m.auths))
+	now := time.Now()
 	for _, auth := range m.auths {
-		if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+		if auth == nil || auth.Disabled || auth.Status == StatusDisabled || FleetCredentialEnded(auth, now) {
 			continue
 		}
 		provider := canonicalSchedulingProvider(auth.Provider)
@@ -1155,8 +1156,9 @@ func (m *Manager) HasProviderAuth(provider string) bool {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	now := time.Now()
 	for _, auth := range m.auths {
-		if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+		if auth == nil || auth.Disabled || auth.Status == StatusDisabled || FleetCredentialEnded(auth, now) {
 			continue
 		}
 		if canonicalSchedulingProvider(auth.Provider) == targetKey {
