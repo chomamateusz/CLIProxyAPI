@@ -18,7 +18,18 @@ type clientKeyUsageReport struct {
 	RecordingSince *string              `json:"recording_since"`
 	Granularity    string               `json:"granularity"`
 	Keys           []clientKeyUsageView `json:"keys"`
+	Series         *[]usageSeriesView   `json:"series,omitempty"`
 }
+
+type usageSeriesView struct {
+	Start    string `json:"start"`
+	Key      string `json:"key"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	fleetusage.Counters
+}
+
+const maxHourSeriesWindow = 744 * time.Hour
 
 type clientKeyUsageView struct {
 	Name      string  `json:"name"`
@@ -36,14 +47,24 @@ func (h *Handler) GetClientKeyUsage(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	now := time.Now().UTC()
 	ledger := fleetusage.Active()
+	granularity, withSeries, errSeries := parseSeriesGranularity(c.Query("series"))
+	if errSeries != nil {
+		clientKeyPolicyError(c, http.StatusBadRequest, "invalid_series", errSeries.Error())
+		return
+	}
 	recordingSince, recording := ledger.RecordingSince()
 	window, errWindow := parseUsageWindow(c.Query("from"), c.Query("to"), now, recordingSince, recording)
 	if errWindow != nil {
 		clientKeyPolicyError(c, http.StatusBadRequest, "invalid_window", errWindow.Error())
 		return
 	}
+	if withSeries && granularity == fleetusage.GranularityHour && window.to.Sub(window.from) > maxHourSeriesWindow {
+		clientKeyPolicyError(c, http.StatusBadRequest, "invalid_window", "series=hour allows at most 744 hours; use series=day")
+		return
+	}
+	keyFilter := strings.TrimSpace(c.Query("key"))
 	createdAt := h.clientKeyCreationTimes()
-	usage := ledger.Usage(window.from, window.to, strings.TrimSpace(c.Query("key")))
+	usage := ledger.Usage(window.from, window.to, keyFilter)
 	keys := make([]clientKeyUsageView, 0, len(usage))
 	for _, entry := range usage {
 		created, current := createdAt[entry.Name]
@@ -63,14 +84,42 @@ func (h *Handler) GetClientKeyUsage(c *gin.Context) {
 		GeneratedAt: now.Format(time.RFC3339),
 		From:        window.from.Format(time.RFC3339),
 		To:          window.to.Format(time.RFC3339),
-		Granularity: "hour",
+		Granularity: string(granularity),
 		Keys:        keys,
+	}
+	if withSeries {
+		series := seriesViews(ledger.Series(window.from, window.to, keyFilter, granularity))
+		report.Series = &series
 	}
 	if recording {
 		since := recordingSince.Format(time.RFC3339)
 		report.RecordingSince = &since
 	}
 	c.JSON(http.StatusOK, report)
+}
+
+func parseSeriesGranularity(raw string) (granularity fleetusage.Granularity, withSeries bool, err error) {
+	switch fleetusage.Granularity(raw) {
+	case "":
+		return fleetusage.GranularityHour, false, nil
+	case fleetusage.GranularityHour, fleetusage.GranularityDay:
+		return fleetusage.Granularity(raw), true, nil
+	}
+	return "", false, errors.New("series must be hour or day")
+}
+
+func seriesViews(buckets []fleetusage.SeriesBucket) []usageSeriesView {
+	views := make([]usageSeriesView, 0, len(buckets))
+	for _, bucket := range buckets {
+		views = append(views, usageSeriesView{
+			Start:    bucket.Start.Format(time.RFC3339),
+			Key:      bucket.Key,
+			Provider: bucket.Provider,
+			Model:    bucket.Model,
+			Counters: bucket.Counters,
+		})
+	}
+	return views
 }
 
 func (h *Handler) clientKeyCreationTimes() map[string]string {

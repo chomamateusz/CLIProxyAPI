@@ -242,11 +242,11 @@ func TestClientKeyUsageConcurrentWithRecordingAndFlush(t *testing.T) {
 	}
 }
 
-func TestIssuerAllowsOnlyClientKeyUsageRead(t *testing.T) {
+func TestIssuerAllowsOnlyClientKeyUsageReads(t *testing.T) {
 	issuer := managementPrincipal{Kind: "issuer", Name: "fleet"}
 	management := managementPrincipal{Kind: "management", Name: "management"}
 	router := gin.New()
-	routes := []string{"/v8/management/usage/client-keys", "/v8/management/issued-keys", "/v8/management/issued-keys/:name", "/v8/management/config", "/v8/management/observability/usage/api-keys"}
+	routes := []string{"/v8/management/usage/client-keys", "/v8/management/usage/recent-requests", "/v8/management/issued-keys", "/v8/management/issued-keys/:name", "/v8/management/config", "/v8/management/observability/usage/api-keys"}
 	for _, path := range routes {
 		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 			router.Handle(method, path, func(c *gin.Context) {
@@ -255,10 +255,11 @@ func TestIssuerAllowsOnlyClientKeyUsageRead(t *testing.T) {
 		}
 	}
 	allowedForIssuer := map[string]bool{
-		"GET /v8/management/usage/client-keys":    true,
-		"GET /v8/management/issued-keys":          true,
-		"POST /v8/management/issued-keys":         true,
-		"DELETE /v8/management/issued-keys/:name": true,
+		"GET /v8/management/usage/client-keys":     true,
+		"GET /v8/management/usage/recent-requests": true,
+		"GET /v8/management/issued-keys":           true,
+		"POST /v8/management/issued-keys":          true,
+		"DELETE /v8/management/issued-keys/:name":  true,
 	}
 	for _, path := range routes {
 		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
@@ -280,4 +281,121 @@ func concretePath(path string) string {
 		return "/v8/management/issued-keys/worker"
 	}
 	return path
+}
+
+func TestClientKeyUsageSeries(t *testing.T) {
+	ledger := startTestLedger(t)
+	day := time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, -3)
+	recordUsage(ledger, policyContext("server"), "codex", "gpt-6", day.Add(22*time.Hour), 1, false)
+	recordUsage(ledger, policyContext("laptop"), "codex", "gpt-6", day.Add(22*time.Hour), 2, false)
+	recordUsage(ledger, policyContext("laptop"), "codex", "gpt-6", day.Add(22*time.Hour+30*time.Minute), 0, true)
+	recordUsage(ledger, policyContext("laptop"), "claude", "opus", day.Add(23*time.Hour), 4, false)
+	recordUsage(ledger, policyContext("laptop"), "codex", "gpt-6", day.Add(25*time.Hour), 8, false)
+	h := clientKeyUsageHandler()
+	window := url.Values{"from": {day.Format(time.RFC3339)}, "to": {day.Add(48 * time.Hour).Format(time.RFC3339)}}
+	withQuery := func(extra map[string]string) url.Values {
+		query := url.Values{}
+		for name, values := range window {
+			query[name] = values
+		}
+		for name, value := range extra {
+			query.Set(name, value)
+		}
+		return query
+	}
+	type seriesRow struct {
+		Start    string `json:"start"`
+		Key      string `json:"key"`
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		fleetusage.Counters
+	}
+	decodeSeries := func(rec *httptest.ResponseRecorder) []seriesRow {
+		var report struct {
+			Granularity string       `json:"granularity"`
+			Series      *[]seriesRow `json:"series"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &report); err != nil || report.Series == nil {
+			t.Fatalf("series missing: %s", rec.Body.String())
+		}
+		return *report.Series
+	}
+
+	rec, body := getClientKeyUsage(t, h, window)
+	if _, present := body["series"]; rec.Code != http.StatusOK || present || body["granularity"] != "hour" {
+		t.Fatalf("without series the report must keep its shape: %s", rec.Body.String())
+	}
+
+	rec, body = getClientKeyUsage(t, h, withQuery(map[string]string{"series": "hour"}))
+	if rec.Code != http.StatusOK || body["granularity"] != "hour" || len(body["keys"].([]any)) != 2 {
+		t.Fatalf("hour series: %s", rec.Body.String())
+	}
+	hourly := decodeSeries(rec)
+	wantHourly := []struct {
+		start                   time.Time
+		key, provider           string
+		requests, failed, total int64
+	}{
+		{day.Add(22 * time.Hour), "laptop", "codex", 1, 1, 2},
+		{day.Add(22 * time.Hour), "server", "codex", 1, 0, 1},
+		{day.Add(23 * time.Hour), "laptop", "claude", 1, 0, 4},
+		{day.Add(25 * time.Hour), "laptop", "codex", 1, 0, 8},
+	}
+	if len(hourly) != len(wantHourly) {
+		t.Fatalf("hour series rows: %+v", hourly)
+	}
+	for i, want := range wantHourly {
+		got := hourly[i]
+		if got.Start != want.start.Format(time.RFC3339) || got.Key != want.key || got.Provider != want.provider || got.Requests != want.requests || got.FailedRequests != want.failed || got.TotalTokens != want.total {
+			t.Fatalf("hour row %d = %+v, want %+v", i, got, want)
+		}
+	}
+
+	rec, body = getClientKeyUsage(t, h, withQuery(map[string]string{"series": "day", "key": "laptop"}))
+	if rec.Code != http.StatusOK || body["granularity"] != "day" {
+		t.Fatalf("day series: %s", rec.Body.String())
+	}
+	daily := decodeSeries(rec)
+	if len(daily) != 3 ||
+		daily[0].Start != day.Format(time.RFC3339) || daily[0].Provider != "claude" || daily[0].TotalTokens != 4 ||
+		daily[1].Start != day.Format(time.RFC3339) || daily[1].Provider != "codex" || daily[1].Requests != 1 || daily[1].FailedRequests != 1 || daily[1].TotalTokens != 2 ||
+		daily[2].Start != day.AddDate(0, 0, 1).Format(time.RFC3339) || daily[2].TotalTokens != 8 {
+		t.Fatalf("day series rows: %+v", daily)
+	}
+	for _, row := range daily {
+		if row.Key != "laptop" {
+			t.Fatalf("key filter must apply to the series: %+v", daily)
+		}
+	}
+
+	rec, _ = getClientKeyUsage(t, h, withQuery(map[string]string{"series": "day", "key": "nobody"}))
+	if rows := decodeSeries(rec); len(rows) != 0 || !strings.Contains(rec.Body.String(), `"series":[]`) {
+		t.Fatalf("an empty series must be an empty array: %s", rec.Body.String())
+	}
+
+	longWindow := url.Values{"from": {day.AddDate(0, 0, -40).Format(time.RFC3339)}, "to": {day.Add(48 * time.Hour).Format(time.RFC3339)}}
+	longWindow.Set("series", "hour")
+	rec, body = getClientKeyUsage(t, h, longWindow)
+	if rec.Code != http.StatusBadRequest || body["error"] != "invalid_window" {
+		t.Fatalf("series=hour beyond 744 hours must be rejected: %d %s", rec.Code, rec.Body.String())
+	}
+	longWindow.Set("series", "day")
+	if rec, _ = getClientKeyUsage(t, h, longWindow); rec.Code != http.StatusOK || len(decodeSeries(rec)) != 4 {
+		t.Fatalf("series=day accepts any window: %d %s", rec.Code, rec.Body.String())
+	}
+	longWindow.Del("series")
+	if rec, _ = getClientKeyUsage(t, h, longWindow); rec.Code != http.StatusOK {
+		t.Fatalf("the window limit applies only to series=hour: %d %s", rec.Code, rec.Body.String())
+	}
+	limitWindow := url.Values{"from": {day.Format(time.RFC3339)}, "to": {day.Add(744 * time.Hour).Format(time.RFC3339)}, "series": {"hour"}}
+	if rec, _ = getClientKeyUsage(t, h, limitWindow); rec.Code != http.StatusOK {
+		t.Fatalf("exactly 744 hours is allowed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	for _, value := range []string{"week", "HOUR", "1h"} {
+		rec, body = getClientKeyUsage(t, h, withQuery(map[string]string{"series": value}))
+		if rec.Code != http.StatusBadRequest || body["error"] != "invalid_series" || body["message"] == "" {
+			t.Fatalf("series=%s: %d %s", value, rec.Code, rec.Body.String())
+		}
+	}
 }
