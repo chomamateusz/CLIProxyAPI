@@ -268,3 +268,76 @@ func dayStart(t time.Time) time.Time {
 func retentionCutoff(now time.Time) time.Time {
 	return dayStart(now).AddDate(0, 0, -RetentionDays)
 }
+
+type Granularity string
+
+const (
+	GranularityHour Granularity = "hour"
+	GranularityDay  Granularity = "day"
+)
+
+type SeriesBucket struct {
+	Start    time.Time
+	Key      string
+	Provider string
+	Model    string
+	Counters
+}
+
+func (l *Ledger) Series(from, to time.Time, keyFilter string, granularity Granularity) []SeriesBucket {
+	if l == nil {
+		return []SeriesBucket{}
+	}
+	fromUnix, toUnix := from.Unix(), to.Unix()
+	firstDay := dayStart(from).Unix()
+	totals := make(map[bucketKey]*Counters)
+	l.mu.Lock()
+	for day, buckets := range l.days {
+		if day < firstDay || day >= toUnix {
+			continue
+		}
+		for key, counters := range buckets {
+			if key.hour < fromUnix || key.hour >= toUnix || (keyFilter != "" && key.key != keyFilter) {
+				continue
+			}
+			if granularity == GranularityDay {
+				key.hour = day
+			}
+			total := totals[key]
+			if total == nil {
+				total = &Counters{}
+				totals[key] = total
+			}
+			total.add(*counters)
+		}
+	}
+	l.mu.Unlock()
+
+	result := make([]SeriesBucket, 0, len(totals))
+	for key, counters := range totals {
+		if *counters == (Counters{}) {
+			continue
+		}
+		result = append(result, SeriesBucket{
+			Start:    time.Unix(key.hour, 0).UTC(),
+			Key:      key.key,
+			Provider: key.provider,
+			Model:    key.model,
+			Counters: *counters,
+		})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		a, b := result[i], result[j]
+		if !a.Start.Equal(b.Start) {
+			return a.Start.Before(b.Start)
+		}
+		if a.Key != b.Key {
+			return a.Key < b.Key
+		}
+		if a.Provider != b.Provider {
+			return a.Provider < b.Provider
+		}
+		return a.Model < b.Model
+	})
+	return result
+}

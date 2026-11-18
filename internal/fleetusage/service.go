@@ -39,6 +39,7 @@ func (usagePlugin) HandleUsage(ctx context.Context, record coreusage.Record) {
 	if ledger := active.Load(); ledger != nil {
 		ledger.Record(ctx, record)
 	}
+	recent.Record(ctx, record)
 }
 
 func Active() *Ledger { return active.Load() }

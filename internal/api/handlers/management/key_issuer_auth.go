@@ -22,7 +22,10 @@ func (p managementPrincipal) allows(c *gin.Context) bool {
 	}
 	switch c.Request.Method {
 	case http.MethodGet:
-		return c.FullPath() == "/v8/management/issued-keys" || c.FullPath() == "/v8/management/usage/client-keys"
+		switch c.FullPath() {
+		case "/v8/management/issued-keys", "/v8/management/usage/client-keys", "/v8/management/usage/recent-requests":
+			return true
+		}
 	case http.MethodPost:
 		return c.FullPath() == "/v8/management/issued-keys"
 	case http.MethodDelete:

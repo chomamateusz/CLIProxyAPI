@@ -208,3 +208,70 @@ func TestConcurrentRecordFlushAndQuery(t *testing.T) {
 		}
 	}
 }
+
+func TestSeriesHourAndDayBuckets(t *testing.T) {
+	ledger := NewLedger("", fixedClock)
+	dayOne := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
+	record := func(name, provider, model string, at time.Time, total int64) {
+		ledger.Record(namedContext(name), coreusage.Record{Provider: provider, Model: model, RequestedAt: at, Detail: coreusage.Detail{InputTokens: total, TotalTokens: total}})
+	}
+	record("server", "codex", "gpt-6", dayOne.Add(23*time.Hour), 1)
+	record("laptop", "codex", "gpt-6", dayOne.Add(23*time.Hour+10*time.Minute), 2)
+	record("laptop", "codex", "gpt-6", dayOne.Add(23*time.Hour+50*time.Minute), 3)
+	record("laptop", "claude", "opus", dayOne.Add(23*time.Hour), 4)
+	record("laptop", "codex", "gpt-6", dayOne.Add(2*time.Hour), 5)
+	record("laptop", "codex", "gpt-6", dayOne.Add(25*time.Hour), 6)
+	record("laptop", "codex", "gpt-6", dayOne.Add(47*time.Hour), 7)
+
+	hourly := ledger.Series(dayOne.Add(23*time.Hour), dayOne.Add(26*time.Hour), "", GranularityHour)
+	type row struct {
+		start            time.Time
+		key, provider    string
+		requests, tokens int64
+	}
+	got := make([]row, 0, len(hourly))
+	for _, bucket := range hourly {
+		got = append(got, row{bucket.Start, bucket.Key, bucket.Provider, bucket.Requests, bucket.TotalTokens})
+	}
+	want := []row{
+		{dayOne.Add(23 * time.Hour), "laptop", "claude", 1, 4},
+		{dayOne.Add(23 * time.Hour), "laptop", "codex", 2, 5},
+		{dayOne.Add(23 * time.Hour), "server", "codex", 1, 1},
+		{dayOne.Add(25 * time.Hour), "laptop", "codex", 1, 6},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("hourly series = %+v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("hourly row %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	daily := ledger.Series(dayOne, dayOne.Add(48*time.Hour), "laptop", GranularityDay)
+	if len(daily) != 3 {
+		t.Fatalf("daily series = %+v", daily)
+	}
+	if daily[0].Start != dayOne || daily[0].Provider != "claude" || daily[0].TotalTokens != 4 {
+		t.Fatalf("daily row 0 = %+v", daily[0])
+	}
+	if daily[1].Start != dayOne || daily[1].Provider != "codex" || daily[1].Requests != 3 || daily[1].TotalTokens != 10 || daily[1].InputTokens != 10 {
+		t.Fatalf("daily row 1 = %+v", daily[1])
+	}
+	if daily[2].Start != dayOne.AddDate(0, 0, 1) || daily[2].Requests != 2 || daily[2].TotalTokens != 13 {
+		t.Fatalf("daily row 2 = %+v", daily[2])
+	}
+	for _, bucket := range daily {
+		if bucket.Key != "laptop" {
+			t.Fatalf("key filter leaked %q", bucket.Key)
+		}
+	}
+
+	clipped := ledger.Series(dayOne.Add(23*time.Hour), dayOne.Add(26*time.Hour), "laptop", GranularityDay)
+	if len(clipped) != 3 || clipped[1].TotalTokens != 5 || clipped[2].Start != dayOne.AddDate(0, 0, 1) || clipped[2].TotalTokens != 6 {
+		t.Fatalf("day buckets must only sum hours inside the window: %+v", clipped)
+	}
+	if empty := ledger.Series(dayOne.Add(-48*time.Hour), dayOne, "", GranularityHour); empty == nil || len(empty) != 0 {
+		t.Fatalf("a window without data must be an empty slice: %+v", empty)
+	}
+}
