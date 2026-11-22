@@ -20,6 +20,7 @@ const (
 	resetGrantWindowWeekly         = "seven_day"
 	resetGrantWindowFable          = "seven_day_overage_included"
 	resetGrantWeek                 = 7 * 24 * time.Hour
+	resetGrantMaxWeeks             = 52
 )
 
 var (
@@ -304,7 +305,7 @@ func endingResetBinding(auth *Auth, endsAt time.Time, fable bool, now time.Time)
 	if !ok || use.count == 0 {
 		return endsAt
 	}
-	binding := endsAt.Add(-time.Duration(use.count) * resetGrantWeek)
+	binding := endsAt.Add(-time.Duration(min(use.count, resetGrantMaxWeeks)) * resetGrantWeek)
 	if !use.expiresAt.IsZero() && use.expiresAt.Before(binding) {
 		binding = use.expiresAt
 	}

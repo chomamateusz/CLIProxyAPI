@@ -281,6 +281,11 @@ func TestUseOrLoseDrainsEndingResetGrants(t *testing.T) {
 		{name: "a past binding outranks a reset inside the tie hour", endIn: 7*day - 10*time.Minute, grants: weeklyGrants(1), prepare: func(steady, _ *Auth, _ *UseOrLoseSelector) {
 			useOrLoseTestWindow(steady, "7d", now.Add(20*time.Minute), .1)
 		}, want: "ending"},
+		{name: "setting off keeps the one-hour tie group after a past end", endIn: -10 * time.Minute, grants: weeklyGrants(0), prepare: func(steady, _ *Auth, selector *UseOrLoseSelector) {
+			useOrLoseTestWindow(steady, "7d", now.Add(20*time.Minute), .1)
+			selector.DrainEndingResets = false
+		}, want: "steady"},
+		{name: "an implausible reset count still binds early", endIn: 16 * day, grants: []resetGrant{{resetsLeft: 1 << 31, clears: []string{resetGrantWindowWeekly}}}, want: "ending"},
 		{name: "a stale sample counts as no grants", endIn: 16 * day, grants: weeklyGrants(2), prepare: func(_, ending *Auth, _ *UseOrLoseSelector) {
 			ending.resetGrants.SampledAt = now.Add(-25 * time.Hour)
 		}, want: "steady"},

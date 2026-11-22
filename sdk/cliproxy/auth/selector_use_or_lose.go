@@ -109,7 +109,7 @@ func (s *UseOrLoseSelector) pick(ctx context.Context, provider, model string, au
 		}
 	}
 	tieUntil := earliest.Add(time.Hour)
-	if earliest.Before(now) {
+	if earliest.Before(now) && s.drainsEndingCredentials() && s.drainsEndingResets() {
 		tieUntil = now
 	}
 	selected := ordered[0]
