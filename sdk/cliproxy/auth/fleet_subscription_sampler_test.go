@@ -15,15 +15,38 @@ import (
 )
 
 type subscriptionUpstream struct {
-	mu     sync.Mutex
-	bodies map[string]string
-	status map[string]int
-	calls  map[string]int
-	bad    atomic.Int32
+	mu          sync.Mutex
+	bodies      map[string]string
+	status      map[string]int
+	calls       map[string]int
+	grantBodies map[string]string
+	grantStatus map[string]int
+	grantCalls  map[string]int
+	requests    []string
+	bad         atomic.Int32
 }
 
 func newSubscriptionUpstream() *subscriptionUpstream {
-	return &subscriptionUpstream{bodies: map[string]string{}, status: map[string]int{}, calls: map[string]int{}}
+	return &subscriptionUpstream{bodies: map[string]string{}, status: map[string]int{}, calls: map[string]int{}, grantBodies: map[string]string{}, grantStatus: map[string]int{}, grantCalls: map[string]int{}}
+}
+
+func (u *subscriptionUpstream) setGrants(token, body string, status int) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.grantBodies[token] = body
+	u.grantStatus[token] = status
+}
+
+func (u *subscriptionUpstream) grantCallCount(token string) int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.grantCalls[token]
+}
+
+func (u *subscriptionUpstream) seenRequests() []string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]string(nil), u.requests...)
 }
 
 func (u *subscriptionUpstream) set(token, body string, status int) {
@@ -45,13 +68,27 @@ func (u *subscriptionUpstream) transport() samplerTransport {
 		claudeShape := r.URL.String() == claudeProfileEndpoint && r.Header.Get("Anthropic-Beta") == "oauth-2025-04-20" && r.Header.Get("User-Agent") == constant.ClaudeUserAgent
 		codexShape := r.URL.Path == "/backend-api/subscriptions" && r.URL.Host == "chatgpt.com" && r.URL.Query().Get("account_id") != "" &&
 			r.Header.Get("Chatgpt-Account-Id") == r.URL.Query().Get("account_id") && r.Header.Get("User-Agent") == constant.CodexUserAgent
-		if r.Method != http.MethodGet || !claudeShape && !codexShape {
+		grantShape := r.URL.String() == claudeResetGrantStatusEndpoint && r.Header.Get("Anthropic-Beta") == "oauth-2025-04-20" && r.Header.Get("User-Agent") == constant.ClaudeUserAgent
+		u.mu.Lock()
+		u.requests = append(u.requests, r.Method+" "+r.URL.String())
+		u.mu.Unlock()
+		if r.Method != http.MethodGet || !claudeShape && !codexShape && !grantShape {
 			u.bad.Add(1)
 			return &http.Response{StatusCode: http.StatusNotFound, Body: http.NoBody, Header: make(http.Header)}, nil
 		}
 		u.mu.Lock()
-		u.calls[token]++
-		body, status := u.bodies[token], u.status[token]
+		var body string
+		var status int
+		if grantShape {
+			u.grantCalls[token]++
+			body, status = u.grantBodies[token], u.grantStatus[token]
+			if status == 0 {
+				body, status = "{}", http.StatusOK
+			}
+		} else {
+			u.calls[token]++
+			body, status = u.bodies[token], u.status[token]
+		}
 		u.mu.Unlock()
 		response := samplerResponse(body)
 		response.StatusCode = status

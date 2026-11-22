@@ -175,6 +175,7 @@ routing:
   use-or-lose:
     short-window-cap-pct: 95 # Percent (1 < value <= 100), not a fraction; invalid values use 95.
     drain-ending-credentials: true # Default true: a credential with fleet_ends_at counts that end as its binding reset, so its quota is spent first.
+    drain-ending-resets: true # Default true, only with drain-ending-credentials: an ending Claude credential with n unused weekly reset grants binds n weeks before its end (or at the earliest grant end).
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
   # When true (default), subagents (child sessions with parent references) inherit and bind

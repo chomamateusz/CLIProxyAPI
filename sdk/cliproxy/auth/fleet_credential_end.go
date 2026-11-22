@@ -171,13 +171,19 @@ func (s *UseOrLoseSelector) drainsEndingCredentials() bool {
 	return s.DrainEndingCredentials
 }
 
-func (s *UseOrLoseSelector) drainEndingCredential(auth *Auth, sample useOrLoseSample) useOrLoseSample {
+func (s *UseOrLoseSelector) drainEndingCredential(auth *Auth, sample useOrLoseSample, now time.Time) useOrLoseSample {
 	if !s.drainsEndingCredentials() {
 		return sample
 	}
-	endsAt, ok := FleetCredentialEndsAt(auth)
-	if ok && (sample.window.reset.IsZero() || endsAt.Before(sample.window.reset)) {
-		sample.window.reset = endsAt
+	binding, ok := FleetCredentialEndsAt(auth)
+	if !ok {
+		return sample
+	}
+	if s.drainsEndingResets() {
+		binding = endingResetBinding(auth, binding, sample.fable, now)
+	}
+	if sample.window.reset.IsZero() || binding.Before(sample.window.reset) {
+		sample.window.reset = binding
 	}
 	return sample
 }

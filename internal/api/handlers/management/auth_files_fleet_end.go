@@ -163,6 +163,9 @@ func addFleetEndFields(entry gin.H, end coreauth.FleetCredentialEnd) {
 
 func addAuthFleetEndFields(entry gin.H, auth *coreauth.Auth, now time.Time) {
 	addFleetEndFields(entry, coreauth.FleetCredentialEndFor(auth, now))
+	if grants := coreauth.FleetResetGrantsFor(auth, now); grants != nil {
+		entry["fleet_reset_grants"] = grants
+	}
 }
 
 func addAuthFileJSONFleetEndFields(entry gin.H, data []byte, now time.Time) {

@@ -16,6 +16,7 @@ const useOrLoseProbeInterval = time.Minute
 type UseOrLoseSelector struct {
 	ShortWindowCapPct      float64
 	DrainEndingCredentials bool
+	DrainEndingResets      bool
 
 	mu         sync.Mutex
 	probes     map[useOrLoseProbeKey]useOrLoseProbe
@@ -50,6 +51,7 @@ func (w useOrLoseWindow) usable(now time.Time) bool {
 
 type useOrLoseSample struct {
 	window  useOrLoseWindow
+	fable   bool
 	sampled bool
 	capped  bool
 	atLimit bool
@@ -106,12 +108,16 @@ func (s *UseOrLoseSelector) pick(ctx context.Context, provider, model string, au
 			earliest = sample.window.reset
 		}
 	}
+	tieUntil := earliest.Add(time.Hour)
+	if earliest.Before(now) && s.drainsEndingCredentials() && s.drainsEndingResets() {
+		tieUntil = now
+	}
 	selected := ordered[0]
 	found := false
 	for _, auth := range ordered {
 		sample := samples[auth]
 		// Anchor the tie group to the earliest reset; pairwise one-hour comparisons are not transitive.
-		if !sample.sampled || !earliest.IsZero() && (sample.window.reset.IsZero() || sample.window.reset.After(earliest.Add(time.Hour))) {
+		if !sample.sampled || !earliest.IsZero() && (sample.window.reset.IsZero() || sample.window.reset.After(tieUntil)) {
 			continue
 		}
 		best := samples[selected].window
@@ -127,6 +133,7 @@ func (s *UseOrLoseSelector) pick(ctx context.Context, provider, model string, au
 func (s *UseOrLoseSelector) sampleFor(auth *Auth, model string, now time.Time) useOrLoseSample {
 	observations := quotaObservations(auth)
 	var weekly, short useOrLoseWindow
+	fableWindow := false
 	atLimit := auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now)
 	creditsAvailable := false
 	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
@@ -139,7 +146,7 @@ func (s *UseOrLoseSelector) sampleFor(auth *Auth, model string, now time.Time) u
 				atLimit = atLimit || fable.atLimit(now)
 			}
 			if fable.usable(now) {
-				weekly = fable
+				weekly, fableWindow = fable, true
 			}
 		}
 		short, _ = useOrLoseClaudeWindow(observations, "5h")
@@ -177,10 +184,11 @@ func (s *UseOrLoseSelector) sampleFor(auth *Auth, model string, now time.Time) u
 	capPct := s.effectiveShortWindowCapPct()
 	return s.drainEndingCredential(auth, useOrLoseSample{
 		window:  weekly,
+		fable:   fableWindow,
 		sampled: weekly.usable(now),
 		capped:  !creditsAvailable && shortActive && (short.hasUsage && short.utilisation >= capPct/100 || short.rejected),
 		atLimit: !creditsAvailable && (atLimit || weekly.atLimit(now)),
-	})
+	}, now)
 }
 
 func (w useOrLoseWindow) atLimit(now time.Time) bool {
@@ -303,9 +311,11 @@ func updateUseOrLoseSelector(current, replacement Selector) bool {
 	}
 	capPct := next.effectiveShortWindowCapPct()
 	drain := next.drainsEndingCredentials()
+	drainResets := next.drainsEndingResets()
 	old.mu.Lock()
 	old.ShortWindowCapPct = capPct
 	old.DrainEndingCredentials = drain
+	old.DrainEndingResets = drainResets
 	old.mu.Unlock()
 	return true
 }
