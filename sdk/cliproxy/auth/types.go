@@ -118,6 +118,7 @@ type Auth struct {
 	sampledFable  bool
 	lastRequestAt time.Time
 	subscription  *subscriptionSample
+	resetGrants   *resetGrantSample
 	Success       int64 `json:"-"`
 	Failed        int64 `json:"-"`
 

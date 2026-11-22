@@ -50,6 +50,7 @@ type fleetLimitsCredential struct {
 	EndState     string                     `json:"end_state"`
 	EndsAtSource *string                    `json:"ends_at_source"`
 	EndWarnings  []coreauth.FleetEndWarning `json:"end_warnings"`
+	ResetGrants  *coreauth.FleetResetGrants `json:"reset_grants,omitempty"`
 	Bars         []fleetLimitsBar           `json:"bars"`
 	Credits      *fleetLimitsCredits        `json:"credits,omitempty"`
 	Cooldowns    []fleetLimitsCooldown      `json:"cooldowns"`
@@ -226,6 +227,7 @@ func fleetLimitsCredentialFor(auth *coreauth.Auth, policy *access.KeyPolicy, lab
 		credential.EndsAt = optionalTime(end.EndsAt)
 		credential.EndsAtSource = &end.Source
 	}
+	credential.ResetGrants = coreauth.FleetResetGrantsFor(auth, now)
 	switch {
 	case ended:
 		credential.State = "ended"

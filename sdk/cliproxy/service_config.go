@@ -58,6 +58,7 @@ type routingRuntimeState struct {
 	strategy                        string
 	useOrLoseShortWindowCapPct      float64
 	useOrLoseDrainEndingCredentials bool
+	useOrLoseDrainEndingResets      bool
 	sessionAffinity                 bool
 	sessionAffinityTTL              time.Duration
 	sessionAffinitySubagents        bool
@@ -69,6 +70,7 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		strategy:                        "round-robin",
 		useOrLoseShortWindowCapPct:      config.DefaultUseOrLoseShortWindowCapPct,
 		useOrLoseDrainEndingCredentials: true,
+		useOrLoseDrainEndingResets:      true,
 		sessionAffinityTTL:              time.Hour,
 		sessionAffinitySubagents:        true,
 		sessionAffinityRebindOn:         coreauth.SessionAffinityRebindOnAny,
@@ -92,6 +94,7 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	if state.strategy == "use-or-lose" {
 		state.useOrLoseShortWindowCapPct = cfg.Routing.UseOrLose.EffectiveShortWindowCapPct()
 		state.useOrLoseDrainEndingCredentials = cfg.Routing.UseOrLose.EffectiveDrainEndingCredentials()
+		state.useOrLoseDrainEndingResets = cfg.Routing.UseOrLose.EffectiveDrainEndingResets()
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
@@ -121,7 +124,7 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 	case "nearest-reset":
 		selector = &coreauth.NearestResetSelector{}
 	case "use-or-lose":
-		selector = &coreauth.UseOrLoseSelector{ShortWindowCapPct: state.useOrLoseShortWindowCapPct, DrainEndingCredentials: state.useOrLoseDrainEndingCredentials}
+		selector = &coreauth.UseOrLoseSelector{ShortWindowCapPct: state.useOrLoseShortWindowCapPct, DrainEndingCredentials: state.useOrLoseDrainEndingCredentials, DrainEndingResets: state.useOrLoseDrainEndingResets}
 	case "most-used":
 		selector = &coreauth.MostUsedSelector{}
 	default:

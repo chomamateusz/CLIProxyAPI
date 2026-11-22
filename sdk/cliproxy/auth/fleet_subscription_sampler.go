@@ -198,7 +198,11 @@ func (s *subscriptionSampler) scan(ctx context.Context, now time.Time) time.Time
 		go func() {
 			defer s.workers.Done()
 			sample, err := s.manager.fetchSubscriptionSample(ctx, a)
-			s.finish(ctx, a, job, sample, err)
+			if err == nil && ctx.Err() == nil {
+				s.manager.applySubscriptionSample(ctx, a, sample)
+			}
+			grantErr := s.manager.sampleResetGrants(ctx, a.ID)
+			s.finish(ctx, a, job, err, grantErr)
 		}()
 	}
 	for id, job := range s.jobs {
@@ -209,18 +213,39 @@ func (s *subscriptionSampler) scan(ctx context.Context, now time.Time) time.Time
 	return next
 }
 
-func (s *subscriptionSampler) finish(ctx context.Context, a *Auth, job *subscriptionSampleJob, sample *subscriptionSample, err error) {
+func (s *subscriptionSampler) finish(ctx context.Context, a *Auth, job *subscriptionSampleJob, err, grantErr error) {
 	defer s.notify()
-	if err == nil && ctx.Err() == nil {
-		s.manager.applySubscriptionSample(ctx, a, sample)
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	job.inFlight = false
-	job.failed = err != nil
-	if err != nil && ctx.Err() == nil {
+	job.failed = err != nil || grantErr != nil && !errors.Is(grantErr, errResetGrantNoBlock)
+	if ctx.Err() != nil {
+		return
+	}
+	if err != nil {
 		log.Warnf("subscription sample failed: auth=%s reason=%s", a.ID, err)
 	}
+	switch {
+	case errors.Is(grantErr, errResetGrantNoBlock):
+		log.Debugf("reset grant sample: auth=%s reason=%s", a.ID, grantErr)
+	case grantErr != nil:
+		log.Warnf("reset grant sample failed: auth=%s reason=%s", a.ID, grantErr)
+	}
+}
+
+func (m *Manager) sampleResetGrants(ctx context.Context, id string) error {
+	current, ok := m.GetByID(id)
+	if !ok || ctx.Err() != nil || !resetGrantSampleEligible(current, time.Now()) {
+		return nil
+	}
+	sample, err := m.fetchResetGrantSample(ctx, current)
+	if err != nil {
+		return err
+	}
+	if ctx.Err() == nil {
+		m.applyResetGrantSample(ctx, current, sample)
+	}
+	return nil
 }
 
 func (m *Manager) subscriptionSamplerAuthChanged() {
