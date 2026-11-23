@@ -15,16 +15,16 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
-func TestKeyPolicyChecksClientModelBeforeCloakingAlias(t *testing.T) {
+func TestKeyPolicyChecksCanonicalModelForCloakingAlias(t *testing.T) {
 	const target = "policy-model"
 	alias := claudemodels.EnsureClaudeModelIDPrefix(target)
 	for _, mode := range []string{"messages", "stream", "count"} {
-		for _, allowAlias := range []bool{false, true} {
+		for _, allowTarget := range []bool{false, true} {
 			name := mode + "/denied"
 			allowed := "other-model"
-			if allowAlias {
+			if allowTarget {
 				name = mode + "/allowed"
-				allowed = alias
+				allowed = target
 			}
 			t.Run(name, func(t *testing.T) {
 				base := handlers.NewBaseAPIHandlers(nil, coreauth.NewManager(nil, nil, nil))
@@ -36,16 +36,19 @@ func TestKeyPolicyChecksClientModelBeforeCloakingAlias(t *testing.T) {
 				}
 				recorder := httptest.NewRecorder()
 				c, _ := gin.CreateTestContext(recorder)
-				ctx := access.WithKeyPolicy(context.Background(), &access.KeyPolicy{Models: []string{allowed}})
+				ctx := access.WithKeyPolicy(context.Background(), &access.KeyPolicy{
+					Models:         []string{allowed},
+					ExcludedModels: []string{"claude-fable-*"},
+				})
 				c.Request = httptest.NewRequest("POST", "/v1/messages", strings.NewReader(string(raw))).WithContext(ctx)
 				if mode == "count" {
 					handler.ClaudeCountTokens(c)
 				} else {
 					handler.ClaudeMessages(c)
 				}
-				if allowAlias {
+				if allowTarget {
 					if recorder.Code == http.StatusForbidden {
-						t.Fatal("client alias was checked after resolution")
+						t.Fatal("allowed target was denied based on its client alias")
 					}
 				} else {
 					var response handlers.ErrorResponse

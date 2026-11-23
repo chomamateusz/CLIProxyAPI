@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	claudemodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/claude/models"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 )
 
@@ -28,8 +29,8 @@ func (p *KeyPolicy) AllowsModelRoute(requested, resolved string) bool {
 	if p == nil {
 		return true
 	}
-	requested = strings.TrimSpace(requested)
-	resolved = strings.TrimSpace(resolved)
+	requested = claudemodels.ResolveClaudeModelIDPrefix(strings.TrimSpace(requested))
+	resolved = claudemodels.ResolveClaudeModelIDPrefix(strings.TrimSpace(resolved))
 	requestedBase := strings.TrimSpace(thinking.ParseSuffix(requested).ModelName)
 	resolvedBase := strings.TrimSpace(thinking.ParseSuffix(resolved).ModelName)
 	names := []string{requested, requestedBase, resolved, resolvedBase}

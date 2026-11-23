@@ -176,14 +176,14 @@ func TestPolicyFiltersResolvedExecutionModels(t *testing.T) {
 	if len(models) != 1 || models[0] != "gpt-6" {
 		t.Fatalf("resolved model filtering = %v", models)
 	}
-	ctx = access.WithKeyPolicy(context.Background(), &access.KeyPolicy{Models: []string{"claude-fable-5-dd-4.5-tpg"}, ExcludedModels: []string{"claude-opus*"}})
+	ctx = access.WithKeyPolicy(context.Background(), &access.KeyPolicy{Models: []string{"gpt-5.4"}, ExcludedModels: []string{"claude-fable-*", "claude-opus*"}})
 	models = filterPolicyExecutionModels(ctx, "claude-fable-5-dd-4.5-tpg", []string{"gpt-5.4", "claude-opus-4-6"})
 	if len(models) != 1 || models[0] != "gpt-5.4" {
-		t.Fatalf("exact alias filtering = %v", models)
+		t.Fatalf("canonical model filtering = %v", models)
 	}
 }
 
-func TestPolicyAllowsExactClientAliasThroughConductor(t *testing.T) {
+func TestPolicyAllowsClientAliasesThroughConductor(t *testing.T) {
 	const alias, target, id = "claude-fable-5-dd-4.5-tpg", "gpt-5.4", "alias-policy-auth"
 	executor := &forceMappingExecutor{id: "codex"}
 	manager := NewManager(nil, nil, nil)
@@ -193,10 +193,10 @@ func TestPolicyAllowsExactClientAliasThroughConductor(t *testing.T) {
 	if _, err := manager.Register(context.Background(), &Auth{ID: id, Provider: "codex"}); err != nil {
 		t.Fatal(err)
 	}
-	ctx := access.WithKeyPolicy(context.Background(), &access.KeyPolicy{Models: []string{alias}})
+	ctx := access.WithKeyPolicy(context.Background(), &access.KeyPolicy{Models: []string{target}, ExcludedModels: []string{"claude-fable-*"}})
 	opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.RequestedModelMetadataKey: alias}}
 	if _, err := manager.Execute(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: target}, opts); err != nil {
-		t.Fatalf("Execute() rejected exact client alias: %v", err)
+		t.Fatalf("Execute() rejected the alias of an allowed target: %v", err)
 	}
 	if models := executor.ExecuteModels(); len(models) != 1 || models[0] != target {
 		t.Fatalf("executed models = %v", models)

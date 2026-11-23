@@ -103,6 +103,17 @@ func TestAllowedModelKeyPolicyCredentialFilter(t *testing.T) {
 	}
 }
 
+func TestKeyPolicyClaudeAliasCatalog(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Set(access.KeyPolicyGinKey, &access.KeyPolicy{ExcludedModels: []string{"claude-fable-*", "gpt-6.2-astra"}})
+	body := `{"data":[{"id":"claude-fable-5-dd-2-5-elbaf-edualc"},{"id":"claude-fable-5-dd-los-2.6-tpg"},{"id":"claude-fable-5-dd-artsa-2.6-tpg"}],"first_id":"claude-fable-5-dd-2-5-elbaf-edualc","last_id":"claude-fable-5-dd-artsa-2.6-tpg"}`
+	want := `{"data":[{"id":"claude-fable-5-dd-los-2.6-tpg"}],"first_id":"claude-fable-5-dd-los-2.6-tpg","last_id":"claude-fable-5-dd-los-2.6-tpg"}`
+	got, err := filterKeyPolicyModelList(c, []byte(body))
+	if err != nil || string(got) != want {
+		t.Fatalf("filtered catalog = %s, error %v", got, err)
+	}
+}
+
 func TestKeyPolicyModelListCatalogs(t *testing.T) {
 	for _, tc := range []struct{ name, body, want string }{
 		{"openai", `{"data":[{"id":"allowed"},{"id":"denied"}]}`, `{"data":[{"id":"allowed"}]}`},
