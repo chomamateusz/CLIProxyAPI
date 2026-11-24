@@ -892,3 +892,69 @@ api-keys:
 		t.Fatalf("unexpected loaded headers: %+v", loaded.OpenAICompatibility[0].Headers)
 	}
 }
+
+func TestConfigV8RejectsCloakedClientKeyPatterns(t *testing.T) {
+	h, router, path := newClientKeyPoliciesTestHandler(t, clientKeyPoliciesFixture)
+	router.PATCH("/v8/management/config", h.ConfigV8)
+	router.PUT("/v8/management/config/*path", h.ConfigV8)
+	for _, tc := range []struct{ method, path, body string }{
+		{"PUT", "/v8/management/config/access/api-keys", `[{"key":"new-fixture","models":["CLAUDE-FABLE-5-DD-*"]}]`},
+		{"PATCH", "/v8/management/config", `{"access":{"api-keys":[{"key":"new-fixture","excluded-models":["claude-fable-5-dd-los-2.6-tpg"]}]}}`},
+	} {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body)))
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "real model ID") {
+			t.Fatalf("%s %s: status = %d; body=%s", tc.method, tc.path, rec.Code, rec.Body.String())
+		}
+	}
+	if saved, err := os.ReadFile(path); err != nil || string(saved) != clientKeyPoliciesFixture {
+		t.Fatal("invalid patterns changed the config")
+	}
+}
+
+func TestConfigV8AllowsOtherEditsWhenLegacyCloakedPatternIsPresent(t *testing.T) {
+	raw := strings.Replace(clientKeyPoliciesFixture, "[gpt-old]", `[gpt-old, "claude-fable-5-dd-*"]`, 1)
+	h, router, path := newClientKeyPoliciesTestHandler(t, raw)
+	router.PATCH("/v8/management/config", h.ConfigV8)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/v8/management/config", strings.NewReader(`{"server":{"port":8318}}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	if saved, err := os.ReadFile(path); err != nil || !strings.Contains(string(saved), "port: 8318") || !strings.Contains(string(saved), "claude-fable-5-dd-*") {
+		t.Fatal("config did not preserve the existing pattern during an unrelated edit")
+	}
+
+	router.PUT("/v8/management/config/*path", h.ConfigV8)
+	for _, tc := range []struct {
+		name, body string
+		status     int
+	}{
+		{"different key", `[{"key":"other-fixture","excluded-models":["claude-fable-5-dd-*"]}]`, http.StatusBadRequest},
+		{"different field", `[{"key":"policy-fixture","models":["claude-fable-5-dd-*"]}]`, http.StatusBadRequest},
+		{"delete unrelated key", `["plain-fixture",{"key":"policy-fixture","name":"laptop","excluded-models":["gpt-old","claude-fable-5-dd-*"]}]`, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/v8/management/config/access/api-keys", strings.NewReader(tc.body)))
+			if rec.Code != tc.status {
+				t.Fatalf("status=%d, want %d; body=%s", rec.Code, tc.status, rec.Body.String())
+			}
+			saved, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.status == http.StatusBadRequest {
+				if !strings.Contains(rec.Body.String(), "invalid_model_pattern") || string(saved) != string(before) {
+					t.Fatal("new alias pattern was not rejected without persisting")
+				}
+			} else if strings.Contains(string(saved), "other-fixture") || !strings.Contains(string(saved), "claude-fable-5-dd-*") {
+				t.Fatal("config did not remove the unrelated key and retain the legacy pattern")
+			}
+		})
+	}
+}

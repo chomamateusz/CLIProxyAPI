@@ -5,10 +5,14 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+	claudemodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/claude/models"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"gopkg.in/yaml.v3"
 )
 
@@ -124,6 +128,7 @@ func (h *Handler) ClientKeyPolicies(c *gin.Context) {
 		c.JSON(http.StatusOK, entry)
 		return
 	}
+	before := entry.clientKeyPolicyLists
 	if replacement != nil {
 		entry.clientKeyPolicyLists = *replacement
 	} else {
@@ -131,6 +136,10 @@ func (h *Handler) ClientKeyPolicies(c *gin.Context) {
 		entry.ExcludedModels = mergeClientKeyPolicyList(entry.ExcludedModels, patch.Add.ExcludedModels, patch.Remove.ExcludedModels)
 		entry.Credentials = mergeClientKeyPolicyList(entry.Credentials, patch.Add.Credentials, patch.Remove.Credentials)
 		entry.ExcludedCredentials = mergeClientKeyPolicyList(entry.ExcludedCredentials, patch.Add.ExcludedCredentials, patch.Remove.ExcludedCredentials)
+	}
+	if introducesCloakedModelPattern(before.Models, entry.Models) || introducesCloakedModelPattern(before.ExcludedModels, entry.ExcludedModels) {
+		writeCloakedKeyPolicyError(c)
+		return
 	}
 	entry.HasPolicy = true
 	entry.emptyLists()
@@ -220,6 +229,53 @@ func mergeClientKeyPolicyList(current, add, remove []string) []string {
 		}
 	}
 	return result
+}
+
+func introducesCloakedModelPattern(before, after []string) bool {
+	return slices.ContainsFunc(after, func(pattern string) bool {
+		return claudemodels.IsCloakedModelPattern(pattern) && !slices.Contains(before, pattern)
+	})
+}
+
+type keyPolicyModelPattern struct {
+	key, field, pattern string
+}
+
+func cloakedKeyPolicyPatterns(policies []access.KeyPolicy) map[keyPolicyModelPattern]struct{} {
+	patterns := make(map[keyPolicyModelPattern]struct{})
+	for _, policy := range policies {
+		key := strings.TrimSpace(policy.Key)
+		for _, list := range []struct {
+			field    string
+			patterns []string
+		}{{"models", policy.Models}, {"excluded-models", policy.ExcludedModels}} {
+			for _, pattern := range list.patterns {
+				if claudemodels.IsCloakedModelPattern(pattern) {
+					patterns[keyPolicyModelPattern{key, list.field, pattern}] = struct{}{}
+				}
+			}
+		}
+	}
+	return patterns
+}
+
+func introducesCloakedKeyPolicyPatterns(before []byte, after []access.KeyPolicy) bool {
+	patterns := cloakedKeyPolicyPatterns(after)
+	if len(patterns) == 0 {
+		return false
+	}
+	var previous config.Config
+	if err := yaml.Unmarshal(before, &previous); err != nil {
+		return true
+	}
+	for pattern := range cloakedKeyPolicyPatterns(previous.APIKeyPolicies) {
+		delete(patterns, pattern)
+	}
+	return len(patterns) > 0
+}
+
+func writeCloakedKeyPolicyError(c *gin.Context) {
+	clientKeyPolicyError(c, http.StatusBadRequest, "invalid_model_pattern", "Use the real model ID in client key policies, not a Claude model alias")
 }
 
 func clientKeyPolicyError(c *gin.Context, status int, code, message string) {

@@ -9,7 +9,10 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	claudemodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/claude/models"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
@@ -81,16 +84,42 @@ func checkKeyPolicyRoute(ctx context.Context, requested, resolved string) *inter
 		requested = clientModel
 	}
 	if !policy.AllowsModelRoute(requested, resolved) {
-		body, _ := json.Marshal(ErrorResponse{Error: ErrorDetail{
-			Message: fmt.Sprintf("model %s is not allowed for this API key", requested),
-			Type:    "permission_error", Code: "model_not_allowed",
-		}})
-		return &interfaces.ErrorMessage{StatusCode: http.StatusForbidden, Error: errors.New(string(body)), DirectResponse: true, Body: body}
+		return modelNotAllowed(requested)
 	}
 	return nil
 }
 
-func filterKeyPolicyModelList(c *gin.Context, body []byte) ([]byte, error) {
+func modelNotAllowed(model string) *interfaces.ErrorMessage {
+	body, _ := json.Marshal(ErrorResponse{Error: ErrorDetail{
+		Message: fmt.Sprintf("model %s is not allowed for this API key", model),
+		Type:    "permission_error", Code: "model_not_allowed",
+	}})
+	return &interfaces.ErrorMessage{StatusCode: http.StatusForbidden, Error: errors.New(string(body)), DirectResponse: true, Body: body}
+}
+
+func ClaudeModelAliasPolicyError(c *gin.Context, alias, resolved string) *interfaces.ErrorMessage {
+	if excludesClaudeModelAlias(keyPolicyForGin(c), alias, resolved) {
+		return modelNotAllowed(resolved)
+	}
+	return nil
+}
+
+func excludesClaudeModelAlias(policy *access.KeyPolicy, alias, resolved string) bool {
+	if policy == nil || alias == resolved {
+		return false
+	}
+	alias = strings.TrimSpace(alias)
+	base := strings.TrimSpace(thinking.ParseSuffix(alias).ModelName)
+	for _, pattern := range policy.ExcludedModels {
+		pattern = strings.TrimSpace(pattern)
+		if claudemodels.IsCloakedModelPattern(pattern) && (access.WildcardMatch(pattern, alias) || access.WildcardMatch(pattern, base)) {
+			return true
+		}
+	}
+	return false
+}
+
+func filterKeyPolicyModelList(c *gin.Context, sourceFormat string, body []byte) ([]byte, error) {
 	policy := keyPolicyForGin(c)
 	if policy == nil {
 		return body, nil
@@ -126,7 +155,14 @@ func filterKeyPolicyModelList(c *gin.Context, body []byte) ([]byte, error) {
 			if id == "" {
 				id = strings.TrimPrefix(entry.Name, "models/")
 			}
-			if policy.AllowsModel(id) {
+			policyID := id
+			if sourceFormat == constant.Claude {
+				policyID = claudemodels.ResolveClaudeModelIDPrefix(id)
+				if excludesClaudeModelAlias(policy, id, policyID) {
+					continue
+				}
+			}
+			if policy.AllowsModel(policyID) {
 				filtered = append(filtered, model)
 				ids = append(ids, id)
 			}

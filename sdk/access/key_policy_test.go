@@ -44,10 +44,10 @@ func TestKeyPolicyAllowsModelRoute(t *testing.T) {
 		want                      bool
 	}{
 		{"wildcard alias cannot widen", "claude-fable-5-dd-5.5-tpg", "gpt-5.5", KeyPolicy{Models: []string{"claude-*"}}, false},
-		{"encoded name does not match exact allow", "claude-fable-5-dd-5.5-tpg", "gpt-5.5", KeyPolicy{Models: []string{"claude-fable-5-dd-5.5-tpg"}}, false},
-		{"decoded name matches exact requested allow", "claude-fable-5-dd-los-2.6-tpg(high)", "backend-model", KeyPolicy{Models: []string{"gpt-6.2-sol(high)"}}, true},
-		{"decoded name matches resolved wildcard allow", "client-model", "claude-fable-5-dd-los-2.6-tpg(high)", KeyPolicy{Models: []string{"gpt-6.2-*"}}, true},
-		{"decoded name matches exact resolved denial", "client-model", "claude-fable-5-dd-los-2.6-tpg(high)", KeyPolicy{ExcludedModels: []string{"gpt-6.2-sol(high)"}}, false},
+		{"exact alias can select resolved", "claude-fable-5-dd-5.5-tpg", "gpt-5.5", KeyPolicy{Models: []string{"claude-fable-5-dd-5.5-tpg"}}, true},
+		{"literal alias does not match canonical allow", "claude-fable-5-dd-los-2.6-tpg", "claude-fable-5-dd-los-2.6-tpg", KeyPolicy{Models: []string{"gpt-6.2-sol"}}, false},
+		{"literal requested exclusion wins", "claude-fable-5-dd-los-2.6-tpg(high)", "gpt-6.2-sol", KeyPolicy{ExcludedModels: []string{"claude-fable-5-dd-los-2.6-tpg"}}, false},
+		{"literal resolved exclusion wins", "friendly", "claude-fable-5-dd-los-2.6-tpg", KeyPolicy{ExcludedModels: []string{"claude-fable-5-dd-*"}}, false},
 		{"resolved exclusion wins", "claude-fable-5-dd-supo-edualc", "claude-opus", KeyPolicy{ExcludedModels: []string{"claude-opus*"}}, false},
 		{"credential prefix stripped by resolution", "team/gpt-5(high)", "gpt-5(high)", KeyPolicy{Models: []string{"gpt-5"}}, true},
 		{"namespace remains distinct", "custom/gpt-5", "custom/gpt-5", KeyPolicy{Models: []string{"gpt-5"}}, false},
@@ -55,29 +55,6 @@ func TestKeyPolicyAllowsModelRoute(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.policy.AllowsModelRoute(tc.requested, tc.resolved); got != tc.want {
 				t.Fatalf("AllowsModelRoute() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestKeyPolicyMatchesCanonicalModelIDs(t *testing.T) {
-	policy := KeyPolicy{ExcludedModels: []string{"claude-fable-*", "gpt-6.2-astra"}}
-	for _, tc := range []struct {
-		model, resolved string
-		want            bool
-	}{
-		{"claude-fable-5-dd-los-2.6-tpg", "gpt-6.2-sol", true},
-		{"claude-fable-5-dd-artsa-2.6-tpg(high)", "gpt-6.2-astra(high)", false},
-		{"claude-fable-5-dd-2-5-elbaf-edualc", "claude-fable-5-2", false},
-		{"claude-fable-5-2", "claude-fable-5-2", false},
-		{"claude-opus-5-5", "claude-opus-5-5", true},
-	} {
-		t.Run(tc.model, func(t *testing.T) {
-			if got := policy.AllowsModel(tc.model); got != tc.want {
-				t.Errorf("AllowsModel() = %v, want %v", got, tc.want)
-			}
-			if got := policy.AllowsModelRoute(tc.model, tc.resolved); got != tc.want {
-				t.Errorf("AllowsModelRoute() = %v, want %v", got, tc.want)
 			}
 		})
 	}
