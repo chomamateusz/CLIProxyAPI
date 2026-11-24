@@ -169,6 +169,15 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	before, err := os.ReadFile(h.configFilePath)
+	if err != nil && !os.IsNotExist(err) {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "read_failed", "message": err.Error()})
+		return
+	}
+	if introducesCloakedKeyPolicyPatterns(before, cfg.APIKeyPolicies) {
+		writeCloakedKeyPolicyError(c)
+		return
+	}
 	if WriteConfig(h.configFilePath, body) != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": "failed to write config"})
 		return

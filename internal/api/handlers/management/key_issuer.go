@@ -61,6 +61,10 @@ func (h *Handler) IssuedKeys(c *gin.Context) {
 			clientKeyPolicyError(c, 400, "invalid_body", "Expected a valid name, models, and either expires-at or ttl")
 			return
 		}
+		if introducesCloakedModelPattern(nil, body.Models) {
+			writeCloakedKeyPolicyError(c)
+			return
+		}
 		now := time.Now().UTC()
 		expires := body.ExpiresAt
 		if body.TTL != "" {

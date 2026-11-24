@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 )
 
 func TestDecodeHomeModelsEmptyCatalog(t *testing.T) {
@@ -124,6 +125,42 @@ func TestHomeModelCatalogErrorsRemainErrors(t *testing.T) {
 			}
 			if _, exists := payload["error"]; !exists {
 				t.Fatalf("expected error response; body=%s", recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestHomeModelCatalogScopesClaudeAliasDecodingToAnthropicFormat(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.Home.Enabled = true
+	client := newHomeCatalogClient(t, `{"codex":[{"id":"gpt-6.2-sol"},{"id":"gpt-6.2-astra"}],"claude":[{"id":"claude-fable-5-2"}]}`)
+	previousHome := home.Current()
+	home.SetCurrent(client)
+	t.Cleanup(func() { home.SetCurrent(previousHome) })
+	engine := gin.New()
+	engine.GET("/v1/models", func(c *gin.Context) {
+		c.Set(access.KeyPolicyGinKey, &access.KeyPolicy{ExcludedModels: []string{"claude-fable-*", "gpt-6.2-astra"}})
+	}, server.unifiedModelsHandler(nil, nil))
+
+	for _, tc := range []struct{ name, version, want string }{
+		{"openai", "", "gpt-6.2-sol"},
+		{"anthropic", "2023-06-01", "claude-fable-5-dd-los-2.6-tpg"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+			if tc.version != "" {
+				req.Header.Set("Anthropic-Version", tc.version)
+			}
+			rec := httptest.NewRecorder()
+			engine.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d; body=%s", rec.Code, rec.Body.String())
+			}
+			var body struct {
+				Data []struct{ ID string } `json:"data"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || len(body.Data) != 1 || body.Data[0].ID != tc.want {
+				t.Fatalf("unexpected catalog: %s, error=%v", rec.Body.String(), err)
 			}
 		})
 	}

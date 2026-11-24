@@ -182,6 +182,10 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": err.Error()})
 		return
 	}
+	if introducesCloakedKeyPolicyPatterns(raw, next.APIKeyPolicies) {
+		writeCloakedKeyPolicyError(c)
+		return
+	}
 	if err = config.ValidateV8Config(data); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": err.Error()})
 		return

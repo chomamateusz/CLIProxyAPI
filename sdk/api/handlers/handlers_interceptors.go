@@ -691,7 +691,7 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 		}
 	}
 
-	filteredBody, errPolicy := filterKeyPolicyModelList(c, body)
+	filteredBody, errPolicy := filterKeyPolicyModelList(c, sourceFormat, body)
 	if errPolicy != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errPolicy.Error()})
 		return

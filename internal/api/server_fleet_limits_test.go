@@ -724,3 +724,120 @@ func barsByID(credential map[string]any) map[string]map[string]any {
 	}
 	return bars
 }
+
+func TestFleetLimitsAndModelRoutesUseFormatSpecificIDs(t *testing.T) {
+	const sol, astra, fable = "gpt-6.2-sol", "gpt-6.2-astra", "claude-fable-5-2"
+	const solAlias, astraAlias = "claude-fable-5-dd-los-2.6-tpg", "claude-fable-5-dd-artsa-2.6-tpg"
+	raw := strings.Replace(fleetLimitsConfigYAML, `["claude-fable-*"]`, `["claude-fable-*", "gpt-6.2-astra"]`, 1)
+	server, calls, _ := newFleetLimitsServerWithConfig(t, raw)
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(t.Name(), "codex", []*registry.ModelInfo{{ID: sol}, {ID: astra}, {ID: fable}})
+	t.Cleanup(func() { reg.UnregisterClient(t.Name()) })
+
+	for _, tc := range []struct {
+		name, path, version, want string
+		hidden                    []string
+	}{
+		{"openai", "/v1/models", "", sol, []string{solAlias, astra, fable}},
+		{"anthropic", "/v1/models", "2023-06-01", solAlias, []string{sol, astraAlias, fable}},
+		{"fleet limits", "/v1/fleet/limits", "", sol, []string{solAlias, astra, fable}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			req.Header.Set("X-Api-Key", fleetKeyM1)
+			if tc.version != "" {
+				req.Header.Set("Anthropic-Version", tc.version)
+			}
+			rec := httptest.NewRecorder()
+			server.engine.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			var body struct {
+				Data   []fleetLimitsModel `json:"data"`
+				Models []fleetLimitsModel `json:"models"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			visible := make(map[string]bool)
+			for _, model := range append(body.Data, body.Models...) {
+				visible[model.ID] = true
+			}
+			if !visible[tc.want] {
+				t.Errorf("expected model %q in %v", tc.want, visible)
+			}
+			for _, id := range tc.hidden {
+				if visible[id] {
+					t.Errorf("unexpected model %q in %v", id, visible)
+				}
+			}
+		})
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+solAlias+`","messages":[]}`))
+	req.Header.Set("X-Api-Key", fleetKeyM1)
+	rec := httptest.NewRecorder()
+	server.engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"code":"model_not_allowed"`) || calls.Load() != 0 {
+		t.Fatalf("OpenAI chat did not deny the literal model ID: status=%d, body=%s, calls=%d", rec.Code, rec.Body.String(), calls.Load())
+	}
+}
+
+func TestClaudeRoutesHonorLegacyAliasExclusions(t *testing.T) {
+	const sol, astra = "gpt-6.2-sol", "gpt-6.2-astra"
+	const solAlias, astraAlias = "claude-fable-5-dd-los-2.6-tpg", "claude-fable-5-dd-artsa-2.6-tpg"
+	raw := strings.Replace(fleetLimitsConfigYAML, "  key-issuer-keys:", `    - key: legacy-exact-fixture
+      excluded-models: ["claude-fable-5-dd-artsa-2.6-tpg"]
+    - key: legacy-wildcard-fixture
+      excluded-models: ["claude-fable-5-dd-*"]
+  key-issuer-keys:`, 1)
+	server, calls, _ := newFleetLimitsServerWithConfig(t, raw)
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(t.Name(), "codex", []*registry.ModelInfo{{ID: sol}, {ID: astra}})
+	t.Cleanup(func() { reg.UnregisterClient(t.Name()) })
+
+	for _, tc := range []struct {
+		key                      string
+		solVisible, astraVisible bool
+	}{
+		{"legacy-exact-fixture", true, false},
+		{"legacy-wildcard-fixture", false, false},
+		{fleetKeyM1, true, true},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+			req.Header.Set("X-Api-Key", tc.key)
+			req.Header.Set("Anthropic-Version", "2023-06-01")
+			rec := httptest.NewRecorder()
+			server.engine.ServeHTTP(rec, req)
+			var body struct{ Data []fleetLimitsModel }
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || rec.Code != http.StatusOK {
+				t.Fatalf("unexpected catalog: status=%d, body=%s, error=%v", rec.Code, rec.Body.String(), err)
+			}
+			visible := make(map[string]bool)
+			for _, model := range body.Data {
+				visible[model.ID] = true
+			}
+			if visible[solAlias] != tc.solVisible || visible[astraAlias] != tc.astraVisible {
+				t.Fatalf("unexpected catalog: %v", visible)
+			}
+			if tc.astraVisible {
+				return
+			}
+			for _, mode := range []struct{ path, body string }{
+				{"/v1/messages", `{"model":"` + astraAlias + `","messages":[]}`},
+				{"/v1/messages", `{"model":"` + astraAlias + `","messages":[],"stream":true}`},
+				{"/v1/messages/count_tokens", `{"model":"` + astraAlias + `","messages":[]}`},
+			} {
+				req := httptest.NewRequest(http.MethodPost, mode.path, strings.NewReader(mode.body))
+				req.Header.Set("X-Api-Key", tc.key)
+				rec := httptest.NewRecorder()
+				server.engine.ServeHTTP(rec, req)
+				if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"code":"model_not_allowed"`) || calls.Load() != 0 {
+					t.Fatalf("%s did not reject legacy alias: status=%d, body=%s, calls=%d", mode.path, rec.Code, rec.Body.String(), calls.Load())
+				}
+			}
+		})
+	}
+}

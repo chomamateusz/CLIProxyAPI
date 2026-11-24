@@ -45,6 +45,9 @@ func TestKeyPolicyAllowsModelRoute(t *testing.T) {
 	}{
 		{"wildcard alias cannot widen", "claude-fable-5-dd-5.5-tpg", "gpt-5.5", KeyPolicy{Models: []string{"claude-*"}}, false},
 		{"exact alias can select resolved", "claude-fable-5-dd-5.5-tpg", "gpt-5.5", KeyPolicy{Models: []string{"claude-fable-5-dd-5.5-tpg"}}, true},
+		{"literal alias does not match canonical allow", "claude-fable-5-dd-los-2.6-tpg", "claude-fable-5-dd-los-2.6-tpg", KeyPolicy{Models: []string{"gpt-6.2-sol"}}, false},
+		{"literal requested exclusion wins", "claude-fable-5-dd-los-2.6-tpg(high)", "gpt-6.2-sol", KeyPolicy{ExcludedModels: []string{"claude-fable-5-dd-los-2.6-tpg"}}, false},
+		{"literal resolved exclusion wins", "friendly", "claude-fable-5-dd-los-2.6-tpg", KeyPolicy{ExcludedModels: []string{"claude-fable-5-dd-*"}}, false},
 		{"resolved exclusion wins", "claude-fable-5-dd-supo-edualc", "claude-opus", KeyPolicy{ExcludedModels: []string{"claude-opus*"}}, false},
 		{"credential prefix stripped by resolution", "team/gpt-5(high)", "gpt-5(high)", KeyPolicy{Models: []string{"gpt-5"}}, true},
 		{"namespace remains distinct", "custom/gpt-5", "custom/gpt-5", KeyPolicy{Models: []string{"gpt-5"}}, false},

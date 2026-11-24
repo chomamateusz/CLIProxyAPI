@@ -383,3 +383,41 @@ func TestConfigV8FieldUpdatesKeepComments(t *testing.T) {
 		}
 	}
 }
+
+func TestLegacyConfigYAMLRejectsOnlyNewCloakedClientKeyPatterns(t *testing.T) {
+	const raw = `api-keys:
+  - key: legacy-fixture
+    excluded-models: ["claude-fable-5-dd-*"]
+  - unrelated-fixture
+`
+	h, router, path := newClientKeyPoliciesTestHandler(t, raw)
+	router.PUT("/v0/management/config.yaml", h.PutConfigYAML)
+	for _, body := range []string{
+		strings.Replace(raw, "legacy-fixture", "different-fixture", 1),
+		strings.Replace(raw, `"claude-fable-5-dd-*"`, `"claude-fable-5-dd-*", "claude-fable-5-dd-los-2.6-tpg"`, 1),
+		`config-version: 8
+access:
+  api-keys:
+    - key: new-fixture
+      models: ["claude-fable-5-dd*"]
+`,
+	} {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/v0/management/config.yaml", strings.NewReader(body)))
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid_model_pattern") || !strings.Contains(rec.Body.String(), "real model ID") {
+			t.Fatalf("status=%d; body=%s", rec.Code, rec.Body.String())
+		}
+		if saved, err := os.ReadFile(path); err != nil || string(saved) != raw {
+			t.Fatal("rejected upload changed the config")
+		}
+	}
+	body := strings.Replace(raw, "  - unrelated-fixture\n", "", 1)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/v0/management/config.yaml", strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d; body=%s", rec.Code, rec.Body.String())
+	}
+	if saved, err := os.ReadFile(path); err != nil || string(saved) != body {
+		t.Fatal("config did not remove the unrelated key and retain the legacy pattern")
+	}
+}

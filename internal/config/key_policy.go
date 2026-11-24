@@ -5,7 +5,9 @@ import (
 	"strings"
 	"time"
 
+	claudemodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/claude/models"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
 
@@ -36,6 +38,24 @@ func splitAPIKeyPolicies(root *yaml.Node) ([]access.KeyPolicy, error) {
 		keys.Content[i] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: policy.Key}
 	}
 	return policies, nil
+}
+
+func warnCloakedKeyPolicyPatterns(policies []access.KeyPolicy) {
+	for _, policy := range policies {
+		for _, list := range []struct {
+			field    string
+			patterns []string
+		}{
+			{"models", policy.Models},
+			{"excluded-models", policy.ExcludedModels},
+		} {
+			for _, pattern := range list.patterns {
+				if claudemodels.IsCloakedModelPattern(pattern) {
+					log.WithFields(log.Fields{"name": policy.Name, "field": list.field, "pattern": pattern}).Warn("client key policy uses a Claude model alias; use the real model ID instead")
+				}
+			}
+		}
+	}
 }
 
 func restoreAPIKeyPolicies(root *yaml.Node, cfg *Config) error {

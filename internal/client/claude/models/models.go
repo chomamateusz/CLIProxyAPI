@@ -8,6 +8,10 @@ import (
 
 const claudeDDModelPrefix = "claude-fable-5-dd-"
 
+func IsCloakedModelPattern(pattern string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(pattern)), strings.TrimSuffix(claudeDDModelPrefix, "-"))
+}
+
 // BuildResponse builds an Anthropic model response from available models.
 func BuildResponse(availableModels []map[string]any, disableCloaking bool) map[string]any {
 	models := make([]map[string]any, len(availableModels))

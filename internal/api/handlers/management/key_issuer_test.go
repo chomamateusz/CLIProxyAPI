@@ -21,6 +21,7 @@ import (
 
 func TestIssueRevokeClientKeys(t *testing.T) {
 	raw := strings.Replace(clientKeyPoliciesFixture, "access:\n", "access:\n    key-issuer-keys: [{key: issuer-fixture, name: fleet}, {key: second-fixture, name: other}]\n", 1)
+	raw = strings.Replace(raw, "[gpt-old]", `[gpt-old, "claude-fable-5-dd-*"]`, 1)
 	h, _, path := newClientKeyPoliciesTestHandler(t, raw)
 	h.envSecret = "management-fixture"
 	router := gin.New()
@@ -57,6 +58,13 @@ func TestIssueRevokeClientKeys(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("reload callback missing")
 		}
+	}
+	invalid := request("POST", "/issued-keys", `{"name":"invalid-model-pattern","models":["CLAUDE-FABLE-5-DD-*"]}`, "issuer-fixture", 400)
+	if !strings.Contains(invalid.Body.String(), "real model ID") {
+		t.Fatalf("missing guidance in response: %s", invalid.Body.String())
+	}
+	if saved, err := os.ReadFile(path); err != nil || string(saved) != raw {
+		t.Fatal("invalid pattern changed the config")
 	}
 	rec := request("POST", "/issued-keys", `{"name":"worker","models":["claude-*"],"ttl":"2h"}`, "issuer-fixture", 201)
 	var created struct {

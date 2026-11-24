@@ -136,3 +136,25 @@ func TestResolveClaudeModelIDPrefix(t *testing.T) {
 		})
 	}
 }
+
+func TestIsCloakedModelPattern(t *testing.T) {
+	for _, tc := range []struct {
+		pattern string
+		want    bool
+	}{
+		{"claude-fable-5-dd-los-2.6-tpg", true},
+		{" claude-fable-5-dd ", true},
+		{"CLAUDE-FABLE-5-DD*", true},
+		{"claude-*-DD-*", false},
+		{"*-dd-*", false},
+		{"internal-*-dd-*", false},
+		{"claude-fable-*", false},
+		{"gpt-*", false},
+		{"custom-dd-*", false},
+		{"custom-dd-model", false},
+	} {
+		if got := IsCloakedModelPattern(tc.pattern); got != tc.want {
+			t.Errorf("IsCloakedModelPattern(%q) = %t, want %t", tc.pattern, got, tc.want)
+		}
+	}
+}

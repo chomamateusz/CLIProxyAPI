@@ -3,11 +3,13 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	claudemodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/claude/models"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
@@ -103,6 +105,54 @@ func TestAllowedModelKeyPolicyCredentialFilter(t *testing.T) {
 	}
 }
 
+func TestKeyPolicyClaudeAliasCatalog(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Set(access.KeyPolicyGinKey, &access.KeyPolicy{ExcludedModels: []string{"claude-fable-*", "gpt-6.2-astra"}})
+	body := `{"data":[{"id":"claude-fable-5-dd-2-5-elbaf-edualc"},{"id":"claude-fable-5-dd-los-2.6-tpg"},{"id":"claude-fable-5-dd-artsa-2.6-tpg"}],"first_id":"claude-fable-5-dd-2-5-elbaf-edualc","last_id":"claude-fable-5-dd-artsa-2.6-tpg"}`
+	want := `{"data":[{"id":"claude-fable-5-dd-los-2.6-tpg"}],"first_id":"claude-fable-5-dd-los-2.6-tpg","last_id":"claude-fable-5-dd-los-2.6-tpg"}`
+	got, err := filterKeyPolicyModelList(c, "claude", []byte(body))
+	if err != nil || string(got) != want {
+		t.Fatalf("filtered catalog = %s, error %v", got, err)
+	}
+	got, err = filterKeyPolicyModelList(c, "openai", []byte(body))
+	if err != nil || string(got) != `{"data":[],"first_id":"","last_id":""}` {
+		t.Fatalf("OpenAI catalog = %s, error %v", got, err)
+	}
+}
+
+func TestKeyPolicyPrefixedModelCatalogParity(t *testing.T) {
+	const model = "team/gpt-6.2-sol"
+	for _, tc := range []struct {
+		name    string
+		policy  access.KeyPolicy
+		visible bool
+	}{
+		{"bare allow", access.KeyPolicy{Models: []string{"gpt-6.2-sol"}}, false},
+		{"prefixed allow", access.KeyPolicy{Models: []string{model}}, true},
+		{"bare exclusion", access.KeyPolicy{ExcludedModels: []string{"gpt-6.2-sol"}}, true},
+		{"prefixed exclusion", access.KeyPolicy{ExcludedModels: []string{model}}, false},
+	} {
+		for _, catalog := range []struct{ format, id string }{
+			{"openai", model},
+			{"claude", claudemodels.EnsureClaudeModelIDPrefix(model)},
+		} {
+			t.Run(catalog.format+"/"+tc.name, func(t *testing.T) {
+				c, _ := gin.CreateTestContext(httptest.NewRecorder())
+				c.Set(access.KeyPolicyGinKey, &tc.policy)
+				body := fmt.Sprintf(`{"data":[{"id":%q}]}`, catalog.id)
+				want := `{"data":[]}`
+				if tc.visible {
+					want = body
+				}
+				got, err := filterKeyPolicyModelList(c, catalog.format, []byte(body))
+				if err != nil || string(got) != want {
+					t.Fatalf("filtered catalog = %s, want %s; error=%v", got, want, err)
+				}
+			})
+		}
+	}
+}
+
 func TestKeyPolicyModelListCatalogs(t *testing.T) {
 	for _, tc := range []struct{ name, body, want string }{
 		{"openai", `{"data":[{"id":"allowed"},{"id":"denied"}]}`, `{"data":[{"id":"allowed"}]}`},
@@ -113,12 +163,12 @@ func TestKeyPolicyModelListCatalogs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			c.Set(access.KeyPolicyGinKey, &access.KeyPolicy{Models: []string{"allowed"}})
-			got, err := filterKeyPolicyModelList(c, []byte(tc.body))
+			got, err := filterKeyPolicyModelList(c, tc.name, []byte(tc.body))
 			if err != nil || string(got) != tc.want {
 				t.Fatalf("filtered catalog = %s, error %v", got, err)
 			}
 			c.Set(access.KeyPolicyGinKey, (*access.KeyPolicy)(nil))
-			got, err = filterKeyPolicyModelList(c, []byte(tc.body))
+			got, err = filterKeyPolicyModelList(c, tc.name, []byte(tc.body))
 			if err != nil || string(got) != tc.body {
 				t.Fatal("unrestricted catalog changed")
 			}

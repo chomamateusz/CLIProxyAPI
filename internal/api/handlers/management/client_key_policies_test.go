@@ -237,6 +237,36 @@ func TestClientKeyPoliciesInvalidBody(t *testing.T) {
 	}
 }
 
+func TestClientKeyPoliciesRejectCloakedModelPatterns(t *testing.T) {
+	_, router, path := newClientKeyPoliciesTestHandler(t, clientKeyPoliciesFixture)
+	for _, tc := range []struct{ method, body string }{
+		{"PUT", `{"models":["claude-fable-5-dd-los-2.6-tpg"]}`},
+		{"PUT", `{"excluded-models":["Claude-Fable-5-DD-*"]}`},
+		{"PATCH", `{"add":{"models":["CLAUDE-FABLE-5-DD-*"]}}`},
+		{"PATCH", `{"add":{"excluded-models":["claude-fable-5-dd-los-2.6-tpg"]}}`},
+	} {
+		response := clientKeyPoliciesRequest(t, router, tc.method, "/client-key-policies/laptop", tc.body, http.StatusBadRequest)
+		if !strings.Contains(response.Body.String(), "real model ID") {
+			t.Fatalf("missing guidance in response: %s", response.Body.String())
+		}
+	}
+	if saved, err := os.ReadFile(path); err != nil || string(saved) != clientKeyPoliciesFixture {
+		t.Fatal("invalid patterns changed the config")
+	}
+}
+
+func TestClientKeyPoliciesCanRemoveExistingCloakedModelPattern(t *testing.T) {
+	raw := strings.Replace(clientKeyPoliciesFixture, "[gpt-old]", `[gpt-old, "claude-fable-5-dd-*"]`, 1)
+	_, router, path := newClientKeyPoliciesTestHandler(t, raw)
+	clientKeyPoliciesRequest(t, router, "PUT", "/client-key-policies/laptop", `{"excluded-models":["claude-fable-5-dd-*"],"credentials":["fleet-*"]}`, http.StatusOK)
+	clientKeyPoliciesRequest(t, router, "PATCH", "/client-key-policies/laptop", `{"add":{"excluded-models":["claude-fable-5-dd-*"],"credentials":["dev-*"]}}`, http.StatusOK)
+	clientKeyPoliciesRequest(t, router, "PATCH", "/client-key-policies/laptop", `{"add":{"models":["claude-fable-5-dd-*"]}}`, http.StatusBadRequest)
+	clientKeyPoliciesRequest(t, router, "PATCH", "/client-key-policies/laptop", `{"remove":{"excluded-models":["claude-fable-5-dd-*"]}}`, http.StatusOK)
+	if saved, err := os.ReadFile(path); err != nil || strings.Contains(string(saved), "claude-fable-5-dd-") {
+		t.Fatal("existing alias pattern was not removed")
+	}
+}
+
 func TestClientKeyPoliciesManagementAuthentication(t *testing.T) {
 	h, _, _ := newClientKeyPoliciesTestHandler(t, clientKeyPoliciesFixture)
 	h.envSecret = "management-fixture"

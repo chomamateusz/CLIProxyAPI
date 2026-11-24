@@ -265,6 +265,7 @@ func (cfg *Config) UnmarshalYAML(node *yaml.Node) error {
 	if _, _, errValidate := decoded.FleetAlerts.Durations(); errValidate != nil {
 		return errValidate
 	}
+	warnCloakedKeyPolicyPatterns(policies)
 	*cfg = Config(decoded)
 	cfg.OAuthOnlyFields = nil
 	source := expandConfigAliases(node)

@@ -82,9 +82,10 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 		return
 	}
 
-	// Decode claude-fable-5-dd-<reversed> model IDs back to the real model name for routing.
-	c.Request = c.Request.WithContext(handlers.WithClientRequestedModel(c.Request.Context(), gjson.GetBytes(rawJSON, "model").String()))
-	rawJSON = rewriteClaudeDDModelInBody(rawJSON)
+	rawJSON, allowed := h.resolveClaudeModelForRequest(c, rawJSON)
+	if !allowed {
+		return
+	}
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
@@ -115,9 +116,10 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 		return
 	}
 
-	// Decode claude-fable-5-dd-<reversed> model IDs back to the real model name for routing.
-	c.Request = c.Request.WithContext(handlers.WithClientRequestedModel(c.Request.Context(), gjson.GetBytes(rawJSON, "model").String()))
-	rawJSON = rewriteClaudeDDModelInBody(rawJSON)
+	rawJSON, allowed := h.resolveClaudeModelForRequest(c, rawJSON)
+	if !allowed {
+		return
+	}
 
 	c.Header("Content-Type", "application/json")
 
@@ -135,6 +137,18 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
+}
+
+func (h *ClaudeCodeAPIHandler) resolveClaudeModelForRequest(c *gin.Context, rawJSON []byte) ([]byte, bool) {
+	alias := gjson.GetBytes(rawJSON, "model").String()
+	body := rewriteClaudeDDModelInBody(rawJSON)
+	model := gjson.GetBytes(body, "model").String()
+	if errPolicy := handlers.ClaudeModelAliasPolicyError(c, alias, model); errPolicy != nil {
+		h.WriteErrorResponse(c, errPolicy)
+		return nil, false
+	}
+	c.Request = c.Request.WithContext(handlers.WithClientRequestedModel(c.Request.Context(), model))
+	return body, true
 }
 
 // rewriteClaudeDDModelInBody decodes model IDs of the form claude-fable-5-dd-<reversed>
